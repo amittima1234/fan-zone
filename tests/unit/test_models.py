@@ -1,262 +1,206 @@
-"""Unit tests for SQLAlchemy 2.0 ORM models and relationships."""
+"""Unit tests for SQLAlchemy ORM models (Milestone 3)."""
 
-import pytest
 from datetime import datetime, timezone
-from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
+import pytest
+from sqlalchemy import DateTime, Integer, JSON, String, Text
 
-from fan_zone.config import Settings
-from fan_zone.models.source import Source
-from fan_zone.models.article import Article
-from fan_zone.models.media import ArticleMedia
-from fan_zone.models.tag import Tag, ArticleTag
-from fan_zone.models.enums import IngestionStatus, MediaType, TagType
+from db.session import Base
+from models.feed import ArticleModel, utc_now
 
 
-@pytest.mark.asyncio
-async def test_config_settings_and_normalization():
-    """Test Settings defaults and URL normalizers."""
-    settings = Settings(
-        DATABASE_URL="sqlite:///./test.db",
-        ENVIRONMENT="testing",
-        GEMINI_MODEL="gemini-2.5-flash",
-    )
-    assert settings.DATABASE_URL == "sqlite+aiosqlite:///./test.db"
-    assert settings.is_testing is True
-    assert settings.is_production is False
+@pytest.mark.unit
+class TestArticleModelSchema:
+    """Unit tests validating ArticleModel schema, column definitions, and constraints."""
 
-    pg_settings = Settings(DATABASE_URL="postgresql://user:pass@localhost:5432/fanzone")
-    assert pg_settings.DATABASE_URL == "postgresql+asyncpg://user:pass@localhost:5432/fanzone"
+    def test_table_name(self):
+        """Verify the database table name is 'articles'."""
+        assert ArticleModel.__tablename__ == "articles"
 
+    def test_all_expected_columns_exist(self):
+        """Verify all mandatory and optional columns exist in the table metadata."""
+        cols = ArticleModel.__table__.columns
+        expected_columns = {
+            "id",
+            "title",
+            "url",
+            "publisher",
+            "published_at",
+            "raw_body",
+            "micro_summary",
+            "tags",
+            "tone",
+            "context_label",
+            "category",
+            "author",
+            "image_url",
+            "created_at",
+            "updated_at",
+        }
+        assert expected_columns.issubset(set(cols.keys()))
 
-@pytest.mark.asyncio
-async def test_source_model_creation(db_session: AsyncSession):
-    """Test creating a Source and reading its properties."""
-    source = Source(
-        name="sport5",
-        display_name="Sport5",
-        base_url="https://www.sport5.co.il",
-        feed_url="https://www.sport5.co.il/rss.xml",
-        is_active=True,
-        poll_interval_seconds=300,
-    )
-    db_session.add(source)
-    await db_session.flush()
+    def test_primary_key_column(self):
+        """Verify 'id' is the integer primary key."""
+        col = ArticleModel.__table__.columns["id"]
+        assert col.primary_key is True
+        assert isinstance(col.type, Integer)
 
-    assert source.id is not None
-    assert source.name == "sport5"
-    assert source.code == "sport5"
-    assert source.display_name == "Sport5"
-    assert source.is_active is True
-    assert source.created_at is not None
-    assert source.updated_at is not None
-    assert "sport5" in repr(source)
+    def test_unique_url_constraint(self):
+        """Verify 'url' column is marked unique and indexed."""
+        col = ArticleModel.__table__.columns["url"]
+        assert col.unique is True or col.index is True
+        assert isinstance(col.type, String)
+        assert col.type.length == 1000
 
+    def test_column_nullability_rules(self):
+        """Verify required fields are not nullable while optional fields are nullable."""
+        cols = ArticleModel.__table__.columns
 
-@pytest.mark.asyncio
-async def test_source_unique_name_constraint(db_session: AsyncSession):
-    """Test unique name constraint on Source model."""
-    s1 = Source(name="one", display_name="ONE 1", base_url="https://one.co.il")
-    s2 = Source(name="one", display_name="ONE 2", base_url="https://one.co.il")
-    db_session.add(s1)
-    await db_session.flush()
+        # Non-nullable required fields
+        non_nullable_fields = [
+            "title",
+            "url",
+            "publisher",
+            "published_at",
+            "raw_body",
+            "micro_summary",
+            "tags",
+            "tone",
+            "context_label",
+            "created_at",
+            "updated_at",
+        ]
+        for field in non_nullable_fields:
+            assert cols[field].nullable is False, f"Field '{field}' should be non-nullable"
 
-    db_session.add(s2)
-    with pytest.raises(IntegrityError):
-        await db_session.flush()
-    await db_session.rollback()
+        # Nullable optional metadata fields
+        nullable_fields = ["category", "author", "image_url"]
+        for field in nullable_fields:
+            assert cols[field].nullable is True, f"Field '{field}' should be nullable"
 
+    def test_column_types(self):
+        """Verify column types match the architectural specifications."""
+        cols = ArticleModel.__table__.columns
+        assert isinstance(cols["title"].type, String)
+        assert cols["title"].type.length == 500
+        assert isinstance(cols["publisher"].type, String)
+        assert cols["publisher"].type.length == 50
+        assert isinstance(cols["published_at"].type, DateTime)
+        assert cols["published_at"].type.timezone is True
+        assert isinstance(cols["raw_body"].type, Text)
+        assert isinstance(cols["micro_summary"].type, Text)
+        assert isinstance(cols["tags"].type, JSON)
+        assert isinstance(cols["tone"].type, String)
+        assert cols["tone"].type.length == 20
+        assert isinstance(cols["context_label"].type, String)
+        assert cols["context_label"].type.length == 50
+        assert isinstance(cols["category"].type, String)
+        assert cols["category"].type.length == 100
+        assert isinstance(cols["author"].type, String)
+        assert cols["author"].type.length == 100
+        assert isinstance(cols["image_url"].type, String)
+        assert cols["image_url"].type.length == 1000
+        assert isinstance(cols["created_at"].type, DateTime)
+        assert isinstance(cols["updated_at"].type, DateTime)
 
-@pytest.mark.asyncio
-async def test_tag_model_and_enums(db_session: AsyncSession):
-    """Test Tag creation, slug, and tag types."""
-    tag = Tag(
-        name="מכבי חיפה",
-        slug="maccabi-haifa",
-        tag_type=TagType.TEAM,
-        article_count=5,
-    )
-    db_session.add(tag)
-    await db_session.flush()
-
-    assert tag.id is not None
-    assert tag.name == "מכבי חיפה"
-    assert tag.tag_type == TagType.TEAM
-    assert tag.article_count == 5
-    assert "מכבי חיפה" in repr(tag)
-
-
-@pytest.mark.asyncio
-async def test_tag_unique_name_constraint(db_session: AsyncSession):
-    """Test unique constraint on Tag name."""
-    t1 = Tag(name="כדורגל", slug="football", tag_type=TagType.SPORT)
-    t2 = Tag(name="כדורגל", slug="football", tag_type=TagType.SPORT)
-    db_session.add(t1)
-    await db_session.flush()
-
-    db_session.add(t2)
-    with pytest.raises(IntegrityError):
-        await db_session.flush()
-    await db_session.rollback()
-
-
-@pytest.mark.asyncio
-async def test_article_model_and_relations(db_session: AsyncSession):
-    """Test Article creation, JSON columns, media and tag relations."""
-    source = Source(name="walla", display_name="Walla! Sports", base_url="https://sports.walla.co.il")
-    db_session.add(source)
-    await db_session.flush()
-
-    published_time = datetime(2026, 8, 28, 12, 0, 0, tzinfo=timezone.utc)
-    article = Article(
-        source_id=source.id,
-        canonical_url="https://sports.walla.co.il/item/3600000",
-        content_hash="abc123hash456",
-        original_title="מכבי תל אביב הודיעה על החתמת זר חדש",
-        original_subtitle="הרכש הנוצץ יצטרף לסגל של עודד קטש",
-        author="אורי אוזן",
-        published_at=published_time,
-        raw_paragraphs=["פסקה ראשונה", "פסקה שנייה"],
-        cleaned_body="פסקה ראשונה\n\nפסקה שנייה",
-        sport="כדורסל",
-        competition="יורוליג",
-        teams_json=["מכבי תל אביב"],
-        players_json=["עודד קטש"],
-        tags_json=["החתמה", "זר חדש"],
-        ingestion_status=IngestionStatus.AI_PROCESSED,
-    )
-    db_session.add(article)
-    await db_session.flush()
-
-    assert article.id is not None
-    assert article.source_id == source.id
-    assert article.paragraphs == ["פסקה ראשונה", "פסקה שנייה"]
-    assert article.original_subheadline == "הרכש הנוצץ יצטרף לסגל של עודד קטש"
-    assert article.teams == ["מכבי תל אביב"]
-    assert article.players == ["עודד קטש"]
-    assert article.ingestion_status == IngestionStatus.AI_PROCESSED
-
-    # Add media
-    media1 = ArticleMedia(
-        article_id=article.id,
-        url="https://sports.walla.co.il/img1.jpg",
-        media_type=MediaType.IMAGE,
-        caption="השחקן החדש במדים",
-        credit="וואלה ספורט",
-        is_primary=True,
-        position_index=0,
-    )
-    media2 = ArticleMedia(
-        article_id=article.id,
-        url="https://sports.walla.co.il/vid1.mp4",
-        media_type=MediaType.VIDEO,
-        caption="ביצועי השחקן",
-        is_primary=False,
-        position_index=1,
-    )
-    db_session.add_all([media1, media2])
-
-    # Add tag associations
-    tag1 = Tag(name="כדורסל", slug="basketball", tag_type=TagType.SPORT)
-    tag2 = Tag(name="מכבי תל אביב", slug="maccabi-tel-aviv", tag_type=TagType.TEAM)
-    db_session.add_all([tag1, tag2])
-    await db_session.flush()
-
-    art_tag1 = ArticleTag(article_id=article.id, tag_id=tag1.id)
-    art_tag2 = ArticleTag(article_id=article.id, tag_id=tag2.id)
-    db_session.add_all([art_tag1, art_tag2])
-    await db_session.flush()
-
-    art_id = article.id
-    db_session.expire_all()
-
-    # Verify query with relations
-    stmt = select(Article).where(Article.id == art_id)
-    res = await db_session.execute(stmt)
-    fetched = res.scalar_one()
-    assert len(fetched.media) == 2
-    assert fetched.lead_image is not None
-    assert fetched.lead_image.url == "https://sports.walla.co.il/img1.jpg"
-    assert len(fetched.article_tags) == 2
-    assert len(fetched.tags) == 2
-    assert "מכבי תל אביב" in repr(fetched)
+    def test_indexed_columns(self):
+        """Verify that high-frequency query columns have indexes configured."""
+        cols = ArticleModel.__table__.columns
+        indexed_fields = ["url", "publisher", "published_at", "tone", "context_label"]
+        for field in indexed_fields:
+            assert cols[field].index is True or cols[field].unique is True, (
+                f"Field '{field}' should be indexed"
+            )
 
 
-@pytest.mark.asyncio
-async def test_article_unique_constraints(db_session: AsyncSession):
-    """Test unique constraints on canonical_url and content_hash."""
-    source = Source(name="ynet", display_name="Ynet Sport", base_url="https://ynet.co.il/sport")
-    db_session.add(source)
-    await db_session.flush()
+@pytest.mark.unit
+class TestArticleModelInstance:
+    """Unit tests validating ArticleModel instance behavior, repr, serialization, and helpers."""
 
-    now = datetime.now(timezone.utc)
-    a1 = Article(
-        source_id=source.id,
-        canonical_url="https://www.ynet.co.il/sport/article/1",
-        content_hash="hash_alpha",
-        original_title="כותרת ראשונה",
-        published_at=now,
-    )
-    db_session.add(a1)
-    await db_session.flush()
+    def test_model_instantiation(self):
+        """Verify creating an ArticleModel instance with valid fields."""
+        pub_date = datetime(2026, 8, 29, 12, 0, 0, tzinfo=timezone.utc)
+        article = ArticleModel(
+            id=1,
+            title="מכבי תל אביב ניצחה ביורוליג",
+            url="https://www.sport5.co.il/articles.aspx?docID=12345",
+            publisher="sport5",
+            published_at=pub_date,
+            raw_body="טקסט מלא של הכתבה",
+            micro_summary="מכבי תל אביב גברה על ריאל מדריד ביורוליג.",
+            tags=["מכבי תל אביב", "יורוליג"],
+            tone="hype",
+            context_label="יורוליג",
+            category="כדורסל",
+            author="עמרי פולק",
+            image_url="https://images.sport5.co.il/pic.jpg",
+        )
 
-    # Duplicate canonical_url
-    a2 = Article(
-        source_id=source.id,
-        canonical_url="https://www.ynet.co.il/sport/article/1",
-        content_hash="hash_beta",
-        original_title="כותרת שונה",
-        published_at=now,
-    )
-    db_session.add(a2)
-    with pytest.raises(IntegrityError):
-        await db_session.flush()
-    await db_session.rollback()
+        assert article.id == 1
+        assert article.title == "מכבי תל אביב ניצחה ביורוליג"
+        assert article.url == "https://www.sport5.co.il/articles.aspx?docID=12345"
+        assert article.publisher == "sport5"
+        assert article.published_at == pub_date
+        assert article.tags == ["מכבי תל אביב", "יורוליג"]
+        assert article.tone == "hype"
+        assert article.category == "כדורסל"
 
+    def test_model_repr_string(self):
+        """Verify __repr__ formats a concise informative representation."""
+        article = ArticleModel(
+            id=42,
+            title="כותרת קצרה",
+            publisher="ynet",
+        )
+        repr_str = repr(article)
+        assert "<ArticleModel" in repr_str
+        assert "id=42" in repr_str
+        assert "publisher='ynet'" in repr_str
+        assert "title='כותרת קצרה'" in repr_str
 
-@pytest.mark.asyncio
-async def test_cascade_deletion(db_session: AsyncSession):
-    """Test that deleting an Article cascades to Media and ArticleTags but keeps Tags."""
-    source = Source(name="sport1", display_name="Sport1", base_url="https://sport1.maariv.co.il")
-    db_session.add(source)
-    await db_session.flush()
+    def test_model_repr_truncates_long_title(self):
+        """Verify __repr__ truncates titles exceeding 30 characters."""
+        long_title = "כותרת ארוכה מאוד מאוד של כתבת ספורט מרכזית בישראל"
+        article = ArticleModel(
+            id=10,
+            title=long_title,
+            publisher="one",
+        )
+        repr_str = repr(article)
+        assert "..." in repr_str
 
-    now = datetime.now(timezone.utc)
-    article = Article(
-        source_id=source.id,
-        canonical_url="https://sport1.maariv.co.il/article/100",
-        content_hash="hash_cascade_test",
-        original_title="מבחן מחיקה",
-        published_at=now,
-    )
-    db_session.add(article)
-    await db_session.flush()
+    def test_to_dict_serialization(self):
+        """Verify to_dict returns a complete dictionary matching model attributes."""
+        pub_date = datetime(2026, 8, 29, 10, 0, 0, tzinfo=timezone.utc)
+        article = ArticleModel(
+            id=7,
+            title="הפועל תל אביב החתימה שחקן",
+            url="https://www.ynet.co.il/article/123",
+            publisher="ynet",
+            published_at=pub_date,
+            raw_body="גוף הכתבה",
+            micro_summary="הפועל תל אביב השלימה החתמה חשובה.",
+            tags=["הפועל תל אביב", "כדורגל ישראלי"],
+            tone="objective",
+            context_label="העברות",
+            category="ליגת העל",
+            author="גידי ליפקין",
+            image_url=None,
+        )
 
-    media = ArticleMedia(
-        article_id=article.id,
-        url="https://sport1.maariv.co.il/photo.jpg",
-        is_primary=True,
-    )
-    tag = Tag(name="טניס", slug="tennis", tag_type=TagType.SPORT)
-    db_session.add_all([media, tag])
-    await db_session.flush()
+        d = article.to_dict()
+        assert d["id"] == 7
+        assert d["title"] == "הפועל תל אביב החתימה שחקן"
+        assert d["url"] == "https://www.ynet.co.il/article/123"
+        assert d["publisher"] == "ynet"
+        assert d["tags"] == ["הפועל תל אביב", "כדורגל ישראלי"]
+        assert d["tone"] == "objective"
+        assert d["context_label"] == "העברות"
+        assert d["author"] == "גידי ליפקין"
+        assert d["image_url"] is None
 
-    art_tag = ArticleTag(article_id=article.id, tag_id=tag.id)
-    db_session.add(art_tag)
-    await db_session.flush()
-
-    # Delete article
-    await db_session.delete(article)
-    await db_session.flush()
-
-    # Check that ArticleMedia and ArticleTag were deleted
-    media_res = await db_session.execute(select(ArticleMedia).where(ArticleMedia.article_id == article.id))
-    assert media_res.scalar_one_or_none() is None
-
-    art_tag_res = await db_session.execute(select(ArticleTag).where(ArticleTag.article_id == article.id))
-    assert art_tag_res.scalar_one_or_none() is None
-
-    # Tag itself should still exist
-    tag_res = await db_session.execute(select(Tag).where(Tag.id == tag.id))
-    assert tag_res.scalar_one_or_none() is not None
+    def test_utc_now_helper(self):
+        """Verify utc_now returns a timezone-aware UTC datetime."""
+        now = utc_now()
+        assert isinstance(now, datetime)
+        assert now.tzinfo is not None
+        assert now.tzinfo == timezone.utc

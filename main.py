@@ -1,20 +1,19 @@
-"""FastAPI main application entry point for Fan Zone sports news backend."""
+"""FastAPI main application entrypoint for Fan Zone Israeli Sports News Backend."""
 
 from contextlib import asynccontextmanager
 import logging
 from typing import AsyncGenerator
-
-from fastapi import FastAPI, Request, status
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 
-from fan_zone.api.v1.router import v1_router
-from fan_zone.config import Settings, get_settings
-from fan_zone.db.session import close_db, init_db
-from fan_zone.scheduler.poller import get_scheduler
+from api.v1.api import api_router
+from api.v1.endpoints import feed, health
+from core.config import settings
+from db.session import init_db
+from services.scheduler import scheduler
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO),
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
@@ -22,50 +21,38 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    """Application lifecycle context manager handling startup and graceful shutdown."""
-    settings = getattr(app.state, "settings", None) or get_settings()
-    logger.info("Initializing FanZone database schema and seeding default Israeli sources...")
+    """Application lifespan context manager handling startup and shutdown events."""
+    logger.info("Initializing database tables...")
     try:
-        await init_db(seed_sources=True)
+        await init_db()
+        logger.info("Database tables initialized successfully.")
     except Exception as e:
-        logger.error(f"Database initialization error on startup: {e}", exc_info=True)
+        logger.error("Failed to initialize database tables: %s", e)
 
-    # Initialize and start background scheduler if enabled
-    scheduler = get_scheduler(settings=settings)
+    # Start background scheduler if enabled
     if settings.ENABLE_SCHEDULER:
-        logger.info(f"Starting background ingestion scheduler (interval={settings.POLL_INTERVAL_SECONDS}s)...")
-        await scheduler.start()
-    else:
-        logger.info("Background ingestion scheduler disabled by configuration.")
+        logger.info("Starting periodic scraper scheduler...")
+        scheduler.start()
 
     yield
 
-    # Shutdown sequence
-    logger.info("Shutting down FanZone backend services...")
+    # Shutdown
     if scheduler.is_running:
+        logger.info("Stopping periodic scraper scheduler...")
         await scheduler.stop()
-
-    await close_db()
-    logger.info("FanZone backend shutdown complete.")
+    logger.info("Application shutdown complete.")
 
 
-def create_app(settings: Settings = None) -> FastAPI:
-    """Factory function creating and configuring the FastAPI application instance."""
-    app_settings = settings or get_settings()
-
+def create_application() -> FastAPI:
+    """Instantiate and configure the FastAPI application."""
     app = FastAPI(
-        title="FanZone — Israeli Sports News Ingestion & Tagging API",
-        description=(
-            "Automated monitoring, multi-source ingestion, AI non-clickbait headline generation, "
-            "entity classification, and structured sports REST API."
-        ),
+        title=settings.APP_NAME,
+        description="Ad-free, personalized sports news aggregation backend for Israeli sports feeds.",
         version="1.0.0",
         lifespan=lifespan,
     )
 
-    app.state.settings = app_settings
-
-    # CORS Middleware
+    # CORS configuration allowing open access for mobile/web frontends
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
@@ -74,54 +61,27 @@ def create_app(settings: Settings = None) -> FastAPI:
         allow_headers=["*"],
     )
 
-    # Global unhandled exception handler
-    @app.exception_handler(Exception)
-    async def global_exception_handler(request: Request, exc: Exception):
-        logger.error(f"Unhandled server error on {request.method} {request.url.path}: {exc}", exc_info=True)
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={
-                "error": {
-                    "code": "INTERNAL_SERVER_ERROR",
-                    "message": "An unexpected internal server error occurred.",
-                    "detail": str(exc) if app_settings.DEBUG else None,
-                }
-            },
-        )
+    # Include Versioned API Routes (/api/v1)
+    app.include_router(api_router, prefix="/api/v1")
 
-    # Mount REST API v1 routes
-    app.include_router(v1_router, prefix="/api/v1")
+    # Include Top-Level Aliases for convenience (/api/feed, /health)
+    app.include_router(feed.router, prefix="/api/feed", tags=["feed-alias"])
+    app.include_router(health.router, prefix="/health", tags=["health-root"])
 
-    # Root informational endpoint
-    @app.get("/", tags=["System"])
-    async def root_info():
+    @app.get("/", tags=["root"], summary="Root service discovery")
+    async def root():
+        """Root endpoint providing service metadata and discovery URLs."""
         return {
-            "app": app_settings.APP_NAME,
+            "app_name": settings.APP_NAME,
+            "environment": settings.APP_ENV,
             "version": "1.0.0",
-            "docs": "/docs",
-            "api_v1": "/api/v1",
-            "health": "/api/v1/health",
-        }
-
-    # Root health alias
-    @app.get("/health", tags=["System"])
-    async def root_health():
-        return {
-            "status": "healthy",
-            "message": "FanZone backend service is online",
+            "docs_url": "/docs",
+            "health_url": "/health",
+            "feed_url": "/api/v1/feed",
         }
 
     return app
 
 
-app = create_app()
-
-if __name__ == "__main__":
-    import uvicorn
-    cfg = get_settings()
-    uvicorn.run(
-        "fan_zone.main:app",
-        host=cfg.HOST,
-        port=cfg.PORT,
-        reload=cfg.DEBUG,
-    )
+# Application singleton
+app: FastAPI = create_application()

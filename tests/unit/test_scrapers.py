@@ -1,457 +1,336 @@
-"""Unit tests for Israeli sports news scrapers, 5-tier fallback cascade, and registry."""
+"""Unit tests for portal scrapers, text sanitization, and truncation (Milestone 2)."""
 
 from datetime import datetime, timezone
 import pytest
-from bs4 import BeautifulSoup
+from unittest.mock import AsyncMock, MagicMock, patch
 
-from fan_zone.scrapers.base import (
-    BaseSourceParser,
-    ExtractedArticle,
-    ExtractedImage,
-    clean_html_text,
-    compute_content_hash,
-    extract_heuristic_dom,
-    extract_json_ld,
-    extract_opengraph,
-    extract_trafilatura,
-    normalize_canonical_url,
-    parse_datetime,
-)
-from fan_zone.scrapers.sport5 import Sport5Parser
-from fan_zone.scrapers.one import ONEParser
-from fan_zone.scrapers.walla import WallaParser
-from fan_zone.scrapers.ynet import YnetParser
-from fan_zone.scrapers.sport1 import Sport1Parser
-from fan_zone.scrapers.israel_hayom import IsraelHayomParser
-from fan_zone.scrapers.haaretz import HaaretzParser
-from fan_zone.scrapers.registry import (
-    ScraperRegistry,
+from schemas.feed import RawArticlePayload
+from services.scrapers import (
+    BaseScraper,
+    ONEScraper,
+    SCRAPER_REGISTRY,
+    Sport5Scraper,
+    YnetScraper,
+    get_all_scrapers,
     get_scraper,
-    get_scraper_for_url,
-    list_scrapers,
+    register_scraper,
+    sanitize_article_text,
+    truncate_article_text,
 )
+from tests.fixtures.sample_html import (
+    MALICIOUS_XSS_HTML_SAMPLES,
+    ONE_ARTICLE_HTML,
+    ONE_DIRTY_HTML,
+    ONE_LONG_ARTICLE_HTML,
+    SPORT5_ARTICLE_HTML,
+    SPORT5_DIRTY_HTML,
+    SPORT5_LONG_ARTICLE_HTML,
+    YNET_ARTICLE_HTML,
+    YNET_DIRTY_HTML,
+    YNET_LONG_ARTICLE_HTML,
+)
+from tests.fixtures.sample_rss import (
+    ONE_RSS_XML,
+    SPORT5_RSS_XML,
+    YNET_RSS_XML,
+)
+
+
+class TestSanitizeArticleText:
+    """Unit tests for HTML sanitization and text normalization."""
+
+    def test_empty_and_none_text(self):
+        assert sanitize_article_text("") == ""
+        assert sanitize_article_text(None) == ""
+
+    def test_strip_html_tags(self):
+        html_input = "<div><p>שלום <b>עולם</b>!</p></div>"
+        cleaned = sanitize_article_text(html_input)
+        assert cleaned == "שלום עולם!"
+        assert "<" not in cleaned and ">" not in cleaned
+
+    def test_strip_script_and_style_tags(self):
+        html_input = """
+        <script type="text/javascript">
+            var secret = "stolen_data";
+            console.log(secret);
+        </script>
+        <style>body { color: red; }</style>
+        <h1>כותרת ראשית</h1>
+        <p>תוכן הכתבה.</p>
+        <iframe src="http://evil.com"></iframe>
+        """
+        cleaned = sanitize_article_text(html_input)
+        assert "secret" not in cleaned
+        assert "stolen_data" not in cleaned
+        assert "color: red" not in cleaned
+        assert "evil.com" not in cleaned
+        assert "כותרת ראשית" in cleaned
+        assert "תוכן הכתבה." in cleaned
+
+    def test_unescape_html_entities(self):
+        html_input = "מכבי ת&quot;א גברה על בית&quot;ר &amp; הפועל"
+        cleaned = sanitize_article_text(html_input)
+        assert cleaned == 'מכבי ת"א גברה על בית"ר & הפועל'
+
+    def test_whitespace_normalization(self):
+        raw = "   מכבי    תל   אביב \n\n\n\n  ניצחה   ביורוליג.   "
+        cleaned = sanitize_article_text(raw)
+        assert cleaned == "מכבי תל אביב\n\nניצחה ביורוליג."
+
+    @pytest.mark.parametrize("dirty_html,expected_title,expected_body", MALICIOUS_XSS_HTML_SAMPLES)
+    def test_malicious_xss_vectors(self, dirty_html, expected_title, expected_body):
+        cleaned = sanitize_article_text(dirty_html)
+        assert "alert(" not in cleaned
+        assert "<script>" not in cleaned
+        assert "<iframe>" not in cleaned
+        assert "<style>" not in cleaned
+        assert "<svg" not in cleaned
+        assert "<img" not in cleaned
+        assert "javascript:" not in cleaned
+
+
+class TestTruncateArticleText:
+    """Unit tests for text truncation boundaries."""
+
+    def test_empty_and_short_text(self):
+        assert truncate_article_text("") == ""
+        assert truncate_article_text(None) == ""
+        assert truncate_article_text("Short text") == "Short text"
+
+    def test_strict_3500_char_limit(self):
+        long_text = "א" * 5000
+        truncated = truncate_article_text(long_text, max_chars=3500)
+        assert len(truncated) == 3500
+        assert len(truncated) <= 3500
+
+    def test_exact_limit_boundary(self):
+        exact_text = "ב" * 3500
+        truncated = truncate_article_text(exact_text, max_chars=3500)
+        assert len(truncated) == 3500
+        assert truncated == exact_text
+
+    def test_custom_max_chars(self):
+        text = "Hello Sports Fans!"
+        assert truncate_article_text(text, max_chars=5) == "Hello"
 
 
 class TestSport5Scraper:
-    """Unit tests for Sport5 scraper with HTML fixtures."""
+    """Unit tests for Sport5 portal scraper."""
 
-    @pytest.fixture
-    def sport5_html(self):
-        return """
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>מכבי תל אביב גברה על ריאל | ספורט 5</title>
-        </head>
-        <body>
-            <article class="article-content">
-                <h1 class="article-title">ניצחון דרמטי: מכבי תל אביב גברה 82:85 על ריאל מדריד</h1>
-                <h2 class="article-subtitle">משחק ענק של הצהובים בהיכל. ווייד בולדווין להט עם 28 נקודות.</h2>
-                <span class="article-credit">רועי כהן</span>
-                <span class="article-date">28.08.26 - 22:30</span>
-                <div class="article-main-image">
-                    <img src="https://images.sport5.co.il/main_123.jpg" alt="בולדווין חוגג" />
-                    <div class="main-image-caption">בולדווין חוגג ניצחון (צילום: אלן שיבר)</div>
-                </div>
-                <div class="article-body">
-                    <p>מכבי תל אביב השיגה הערב ניצחון יוקרתי במיוחד בהיכל מנורה מבטחים.</p>
-                    <p>הצהובים של עודד קטש גברו 82:85 על ריאל מדריד במסגרת המחזור ה-15 של היורוליג.</p>
-                    <p>ווייד בולדווין הצטיין עם 28 נקודות ו-6 אסיסטים והוביל את המנצחת.</p>
-                </div>
-                <div class="article-gallery">
-                    <img src="https://images.sport5.co.il/gal_1.jpg" />
-                    <img src="https://images.sport5.co.il/gal_2.jpg" />
-                </div>
-                <div class="article-tags">
-                    <a href="/tag/1">מכבי תל אביב</a>
-                    <a href="/tag/2">יורוליג</a>
-                </div>
-            </article>
-        </body>
-        </html>
-        """
+    def test_sport5_standard_article_extraction(self):
+        scraper = Sport5Scraper()
+        payload = scraper.extract_article(SPORT5_ARTICLE_HTML)
 
-    def test_sport5_parsing(self, sport5_html):
-        parser = Sport5Parser()
-        url = "https://www.sport5.co.il/articles.aspx?FolderID=64&docID=450000"
-        extracted = parser.parse_article_html(sport5_html, url)
+        assert payload is not None
+        assert isinstance(payload, RawArticlePayload)
+        assert payload.publisher == "sport5"
+        assert "מכבי תל אביב" in payload.title
+        assert "ריאל מדריד" in payload.title
+        assert "עודד קטש" in payload.raw_body or "בולדווין" in payload.raw_body
+        assert payload.author == "עמרי פולק"
+        assert len(payload.raw_body) <= 3500
 
-        assert extracted is not None
-        assert extracted.source_name == "Sport5"
-        assert extracted.canonical_url == normalize_canonical_url(url)
-        assert "ניצחון דרמטי" in extracted.original_title
-        assert "ווייד בולדווין להט" in extracted.original_subtitle
-        assert extracted.author == "רועי כהן"
-        assert extracted.published_at.year == 2026
-        assert extracted.published_at.month == 8
-        assert extracted.published_at.day == 28
-        assert len(extracted.paragraphs) == 3
-        assert extracted.main_image is not None
-        assert extracted.main_image.url == "https://images.sport5.co.il/main_123.jpg"
-        assert "אלן שיבר" in (extracted.main_image.caption or "")
-        assert len(extracted.gallery_images) == 2
-        assert "מכבי תל אביב" in extracted.tags
+    def test_sport5_long_article_truncation(self):
+        scraper = Sport5Scraper()
+        payload = scraper.extract_article(SPORT5_LONG_ARTICLE_HTML)
 
+        assert payload is not None
+        assert len(payload.raw_body) <= 3500
+        assert "<script>" not in payload.raw_body
+        assert "Tracking user" not in payload.raw_body
+        assert "<iframe>" not in payload.raw_body
 
-class TestONEScraper:
-    """Unit tests for ONE scraper with RSS and HTML fixtures."""
+    def test_sport5_dirty_html_sanitization(self):
+        scraper = Sport5Scraper()
+        payload = scraper.extract_article(SPORT5_DIRTY_HTML)
 
-    @pytest.fixture
-    def one_rss_xml(self):
-        return """<?xml version="1.0" encoding="utf-8"?>
-        <rss version="2.0">
-            <channel>
-                <title>ONE Sport News</title>
-                <item>
-                    <title>מכבי חיפה ניצחה 0:2 את בית"ר ירושלים</title>
-                    <link>https://www.one.co.il/Article/2026/456789.html?utm_source=rss</link>
-                    <pubDate>Fri, 28 Aug 2026 21:00:00 GMT</pubDate>
-                </item>
-            </channel>
-        </rss>
-        """
+        assert payload is not None
+        assert "malicious_code" not in payload.raw_body
+        assert "tracking" not in payload.raw_body.lower()
+        assert "<style>" not in payload.raw_body
+        assert "ברק בכר" in payload.title or "מכבי חיפה" in payload.title
+        assert "עלי מוחמד" in payload.raw_body
 
-    @pytest.fixture
-    def one_html(self):
-        return """
-        <!DOCTYPE html>
-        <html>
-        <head><title>ONE כתבה</title></head>
-        <body>
-            <div id="article-content">
-                <h1 class="article-title">מכבי חיפה ניצחה 0:2 את בית"ר ירושלים בסמי עופר</h1>
-                <h2 class="article-subtitle">דין דוד ודיא סבע הבקיעו לירוקים, שהעפילו לפסגת ליגת העל.</h2>
-                <span class="article-writer">גידי ליפקין</span>
-                <span class="article-date">28/08/2026 21:15</span>
-                <div class="article-main-img">
-                    <img src="https://images.one.co.il/images/d/dsm/123.jpg" />
-                    <div class="img-credit">צילום: רדאד ג'בארה</div>
-                </div>
-                <div class="article-body-content">
-                    <p>מכבי חיפה רשמה הערב ניצחון מרשים על בית"ר ירושלים באצטדיון סמי עופר.</p>
-                    <p>הקבוצה של ברק בכר שלטה במשחק לכל אורכו והשיגה שלוש נקודות יקרות.</p>
-                </div>
-            </div>
-        </body>
-        </html>
-        """
+    @pytest.mark.asyncio
+    async def test_sport5_fetch_rss_mocked(self):
+        scraper = Sport5Scraper()
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.text = SPORT5_RSS_XML
 
-    def test_one_rss_parsing(self, one_rss_xml):
-        parser = ONEParser()
-        links = parser.parse_rss_feed(one_rss_xml)
-        assert len(links) == 1
-        assert "one.co.il" in links[0]
+        mock_client = AsyncMock()
+        mock_client.get.return_value = mock_response
 
-    def test_one_article_parsing(self, one_html):
-        parser = ONEParser()
-        url = "https://www.one.co.il/Article/2026/456789.html"
-        extracted = parser.parse_article_html(one_html, url)
-        assert extracted is not None
-        assert extracted.source_name == "ONE"
-        assert "מכבי חיפה ניצחה 0:2" in extracted.original_title
-        assert "דין דוד ודיא סבע" in extracted.original_subtitle
-        assert extracted.author == "גידי ליפקין"
-        assert len(extracted.paragraphs) == 2
-        assert extracted.main_image.url == "https://images.one.co.il/images/d/dsm/123.jpg"
-        assert "רדאד ג'בארה" in (extracted.main_image.credit or "")
-
-
-class TestWallaScraper:
-    """Unit tests for Walla! Sports scraper with HTML fixtures."""
-
-    @pytest.fixture
-    def walla_html(self):
-        return """
-        <!DOCTYPE html>
-        <html>
-        <head><title>וואלה ספורט</title></head>
-        <body>
-            <article class="article-text">
-                <h1 class="title">הפועל תל אביב זכתה בגביע המדינה בכדורסל</h1>
-                <h2 class="subtitle">האדומים חגגו תואר היסטורי לאחר דרמה גדולה בהיכל.</h2>
-                <div class="article-author"><span>אור שקדי</span></div>
-                <span class="date">28.08.2026, 23:45</span>
-                <figure class="main-media">
-                    <img src="https://img.wcdn.co.il/f_auto,w_700,t_54/1/2/3/4.jpg" />
-                    <figcaption>הנפת הגביע בהיכל (צילום: ברני ארדוב)</figcaption>
-                </figure>
-                <div class="css-article-body">
-                    <p>הפועל תל אביב השלימה הערב מסע מופלא כשזכתה בגביע המדינה.</p>
-                    <p>במשחק צמוד ומורט עצבים ניצחו האדומים של סטפנוס דדאס את היריבה העירונית.</p>
-                </div>
-            </article>
-        </body>
-        </html>
-        """
-
-    def test_walla_parsing(self, walla_html):
-        parser = WallaParser()
-        url = "https://sports.walla.co.il/item/3691234"
-        extracted = parser.parse_article_html(walla_html, url)
-        assert extracted is not None
-        assert extracted.source_name == "Walla! Sports"
-        assert "הפועל תל אביב זכתה בגביע" in extracted.original_title
-        assert "האדומים חגגו תואר" in extracted.original_subtitle
-        assert extracted.author == "אור שקדי"
-        assert len(extracted.paragraphs) == 2
-        assert extracted.main_image.url == "https://img.wcdn.co.il/f_auto,w_700,t_54/1/2/3/4.jpg"
+        entries = await scraper.fetch_rss(client=mock_client)
+        assert len(entries) == 3
+        assert entries[0]["title"] == "ניצחון ענק: מכבי תל אביב גברה 82:86 על ריאל מדריד ביורוליג"
+        assert "sport5.co.il" in entries[0]["link"]
+        assert entries[0]["author"] == "עמרי פולק"
 
 
 class TestYnetScraper:
-    """Unit tests for Ynet Sport scraper with HTML fixtures."""
+    """Unit tests for Ynet sports portal scraper."""
 
-    @pytest.fixture
-    def ynet_html(self):
-        return """
-        <!DOCTYPE html>
-        <html>
-        <head><title>Ynet ספורט</title></head>
-        <body>
-            <article>
-                <h1 class="mainTitle">ערן זהבי הודיע: אמשיך לעונה נוספת במכבי תל אביב</h1>
-                <h2 class="subTitle">הקפטן הוותיק חתם על חוזה חדש לעונה אחת: "רעב לתארים נוספים".</h2>
-                <div class="authorName">נדב צנציפר</div>
-                <time class="date">28.08.26 , 17:30</time>
-                <figure data-component="media">
-                    <img src="https://images1.ynet.co.il/PicServer5/2026/08/28/123.jpg" />
-                    <figcaption><span class="caption">זהבי במדים הצהובים</span></figcaption>
-                </figure>
-                <div data-component="article-body">
-                    <p>עכשיו זה רשמי: ערן זהבי ממשיך במכבי תל אביב.</p>
-                    <p>החלוץ הוותיק חתם היום על הארכת חוזהו במועדון לעונה נוספת.</p>
-                </div>
-            </article>
-        </body>
-        </html>
-        """
+    def test_ynet_standard_article_extraction(self):
+        scraper = YnetScraper()
+        payload = scraper.extract_article(YNET_ARTICLE_HTML)
 
-    def test_ynet_parsing(self, ynet_html):
-        parser = YnetParser()
-        url = "https://www.ynet.co.il/sport/israelisoccer/article/y12345678"
-        extracted = parser.parse_article_html(ynet_html, url)
-        assert extracted is not None
-        assert extracted.source_name == "Ynet Sport"
-        assert "ערן זהבי הודיע" in extracted.original_title
-        assert "הקפטן הוותיק חתם" in extracted.original_subtitle
-        assert extracted.author == "נדב צנציפר"
-        assert len(extracted.paragraphs) == 2
+        assert payload is not None
+        assert isinstance(payload, RawArticlePayload)
+        assert payload.publisher == "ynet"
+        assert "בית\"ר ירושלים" in payload.title or 'בית"ר' in payload.title
+        assert "ברק אברמוב" in payload.raw_body or "אימון" in payload.raw_body
+        assert len(payload.raw_body) <= 3500
 
+    def test_ynet_long_article_truncation(self):
+        scraper = YnetScraper()
+        payload = scraper.extract_article(YNET_LONG_ARTICLE_HTML)
 
-class TestSport1Scraper:
-    """Unit tests for Sport1 / Maariv scraper with HTML fixtures."""
+        assert payload is not None
+        assert len(payload.raw_body) <= 3500
+        assert "תחקיר" in payload.title
 
-    @pytest.fixture
-    def sport1_html(self):
-        return """
-        <!DOCTYPE html>
-        <html>
-        <head><title>ספורט 1 מעריב</title></head>
-        <body>
-            <article>
-                <h1 class="entry-title">ברק בכר: "הראינו אופי של אלופים, הדרך עוד ארוכה"</h1>
-                <h2 class="entry-subtitle">מאמן מכבי חיפה החמיא לשחקניו לאחר הניצחון במשחק העונה.</h2>
-                <span class="author-name">שלמה וייס</span>
-                <time class="entry-date">2026-08-28T22:45:00+03:00</time>
-                <figure class="featured-image">
-                    <img src="https://sport1.maariv.co.il/wp-content/uploads/2026/08/bachar.jpg" />
-                    <figcaption class="image-caption">ברק בכר על הקווים (צילום: אריאל שלום)</figcaption>
-                </figure>
-                <div class="entry-content">
-                    <p>במכבי חיפה חגגו את הניצחון החשוב שהחזיר את הקבוצה למקום הראשון.</p>
-                    <p>המאמן ברק בכר הדגיש במסיבת העיתונאים את חשיבות המשכיות היכולת הגבוהה.</p>
-                </div>
-            </article>
-        </body>
-        </html>
-        """
+    def test_ynet_dirty_html_sanitization(self):
+        scraper = YnetScraper()
+        payload = scraper.extract_article(YNET_DIRTY_HTML)
 
-    def test_sport1_parsing(self, sport1_html):
-        parser = Sport1Parser()
-        url = "https://sport1.maariv.co.il/israeli-soccer/ligat-haal/article/1234567"
-        extracted = parser.parse_article_html(sport1_html, url)
-        assert extracted is not None
-        assert extracted.source_name == "Sport1"
-        assert "ברק בכר" in extracted.original_title
-        assert extracted.author == "שלמה וייס"
-        assert len(extracted.paragraphs) == 2
+        assert payload is not None
+        assert "dataLayer" not in payload.raw_body
+        assert "javascript:alert" not in payload.raw_body
+        assert "taboola" not in payload.raw_body.lower()
+        assert "הפועל תל אביב" in payload.title or "הפועל תל אביב" in payload.raw_body
+
+    @pytest.mark.asyncio
+    async def test_ynet_fetch_rss_mocked(self):
+        scraper = YnetScraper()
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.text = YNET_RSS_XML
+
+        mock_client = AsyncMock()
+        mock_client.get.return_value = mock_response
+
+        entries = await scraper.fetch_rss(client=mock_client)
+        assert len(entries) == 2
+        assert 'בית"ר ירושלים' in entries[0]["title"]
+        assert "ynet.co.il" in entries[0]["link"]
 
 
-class TestIsraelHayomScraper:
-    """Unit tests for Israel Hayom scraper with HTML fixtures."""
+class TestONEScraper:
+    """Unit tests for ONE sports portal scraper."""
 
-    @pytest.fixture
-    def israel_hayom_html(self):
-        return """
-        <!DOCTYPE html>
-        <html>
-        <head><title>ישראל היום ספורט</title></head>
-        <body>
-            <article>
-                <h1 class="article-title">דני אבדיה קלע 24 נקודות בניצחון פורטלנד</h1>
-                <h2 class="article-subtitle">משחק שיא לישראלי שקטף גם 9 ריבאונדים ומסר 6 אסיסטים.</h2>
-                <div class="writer-name">אבי סגל</div>
-                <time class="article-date">28.08.2026, 06:30</time>
-                <div class="article-main-media">
-                    <img src="https://www.israelhayom.co.il/wp-content/uploads/2026/08/avdija.jpg" />
-                </div>
-                <div class="article-content">
-                    <p>דני אבדיה ממשיך להוכיח את מעמדו כאחד השחקנים המובילים של פורטלנד טרייל בלייזרס.</p>
-                    <p>הפורוורד הישראלי הצטיין הלילה בניצחון על גולדן סטייט ווריורס.</p>
-                </div>
-            </article>
-        </body>
-        </html>
-        """
+    def test_one_standard_article_extraction(self):
+        scraper = ONEScraper()
+        payload = scraper.extract_article(ONE_ARTICLE_HTML)
 
-    def test_israel_hayom_parsing(self, israel_hayom_html):
-        parser = IsraelHayomParser()
-        url = "https://www.israelhayom.co.il/sport/nba/article/1654321"
-        extracted = parser.parse_article_html(israel_hayom_html, url)
-        assert extracted is not None
-        assert extracted.source_name == "Israel Hayom"
-        assert "דני אבדיה קלע" in extracted.original_title
-        assert "משחק שיא לישראלי" in extracted.original_subtitle
-        assert extracted.author == "אבי סגל"
-        assert len(extracted.paragraphs) == 2
+        assert payload is not None
+        assert isinstance(payload, RawArticlePayload)
+        assert payload.publisher == "one"
+        assert "הפועל באר שבע" in payload.title
+        assert "אלונה ברקת" in payload.raw_body or "קשר" in payload.raw_body
+        assert len(payload.raw_body) <= 3500
 
+    def test_one_long_article_truncation(self):
+        scraper = ONEScraper()
+        payload = scraper.extract_article(ONE_LONG_ARTICLE_HTML)
 
-class TestHaaretzScraper:
-    """Unit tests for Haaretz scraper with HTML fixtures."""
+        assert payload is not None
+        assert len(payload.raw_body) <= 3500
+        assert "הפועל באר שבע" in payload.title
 
-    @pytest.fixture
-    def haaretz_html(self):
-        return """
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>הארץ ספורט</title>
-            <meta property="og:title" content="המהפכה השקטה של ענף השחייה בישראל" />
-            <meta property="og:description" content="ההישגים באליפויות העולם מעידים על תוכנית עבודה יסודית וארוכת טווח." />
-            <meta property="og:image" content="https://img.haarets.co.il/img_123.jpg" />
-        </head>
-        <body>
-            <article data-test="articleBody">
-                <h1 data-test="articleHeadline">המהפכה השקטה של ענף השחייה בישראל</h1>
-                <h2 data-test="articleSubtitle">ההישגים באליפויות העולם מעידים על תוכנית עבודה יסודית וארוכת טווח.</h2>
-                <span data-test="authorName">איתמר קציר</span>
-                <time data-test="publishDate">2026-08-28T18:00:00.000Z</time>
-                <figure data-test="mainFigure">
-                    <img src="https://img.haarets.co.il/img_123.jpg" />
-                    <figcaption data-test="caption">אנסטסיה גורבנקו במים (צילום: אי-פי)</figcaption>
-                </figure>
-                <p data-test="articleParagraph">השחייה הישראלית רושמת את אחד הפרקים המרשימים ביותר בתולדותיה.</p>
-                <div data-test="articleParagraph">דור חדש של שחיינים צעירים מגיע לגמרים עולמיים ומביא מדליות יוקרתיות.</div>
-            </article>
-        </body>
-        </html>
-        """
+    def test_one_dirty_html_sanitization(self):
+        scraper = ONEScraper()
+        payload = scraper.extract_article(ONE_DIRTY_HTML)
 
-    def test_haaretz_parsing(self, haaretz_html):
-        parser = HaaretzParser()
-        url = "https://www.haaretz.co.il/sport/swimming/2026-08-28/ty-article/0000018f-1234"
-        extracted = parser.parse_article_html(haaretz_html, url)
-        assert extracted is not None
-        assert extracted.source_name == "Haaretz"
-        assert "המהפכה השקטה" in extracted.original_title
-        assert extracted.author == "איתמר קציר"
-        assert len(extracted.paragraphs) == 2
+        assert payload is not None
+        assert "document.write" not in payload.raw_body
+        assert "sendAnalytics" not in payload.raw_body
+        assert "מנור סולומון" in payload.title or "מנור סולומון" in payload.raw_body
 
+    @pytest.mark.asyncio
+    async def test_one_fetch_rss_mocked(self):
+        scraper = ONEScraper()
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.text = ONE_RSS_XML
 
-class Test5TierFallbackCascade:
-    """Unit tests for the 5-tier extraction fallback cascade."""
+        mock_client = AsyncMock()
+        mock_client.get.return_value = mock_response
 
-    def test_fallback_to_json_ld_when_no_css(self):
-        html = """
-        <html>
-        <head>
-            <script type="application/ld+json">
-            {
-                "@type": "NewsArticle",
-                "headline": "כותרת מ-JSON-LD",
-                "description": "תיאור מ-JSON-LD",
-                "articleBody": "פסקה ראשונה מהגוף.\nפסקה שנייה מהגוף.",
-                "author": "ישראל ישראלי",
-                "datePublished": "2026-08-28T12:00:00Z",
-                "image": "https://example.com/ld_image.jpg"
-            }
-            </script>
-        </head>
-        <body>
-            <div class="custom-unknown-container">תוכן ללא סלקטורים מוכרים</div>
-        </body>
-        </html>
-        """
-        parser = BaseSourceParser()
-        extracted = parser.parse_article_html(html, "https://example.com/article/1")
-        assert extracted.original_title == "כותרת מ-JSON-LD"
-        assert extracted.original_subtitle == "תיאור מ-JSON-LD"
-        assert len(extracted.paragraphs) == 2
-        assert extracted.author == "ישראל ישראלי"
-        assert extracted.main_image.url == "https://example.com/ld_image.jpg"
-
-    def test_fallback_to_opengraph_when_no_json_ld(self):
-        html = """
-        <html>
-        <head>
-            <meta property="og:title" content="כותרת OpenGraph" />
-            <meta property="og:description" content="תיאור OpenGraph" />
-            <meta property="og:image" content="https://example.com/og_image.jpg" />
-        </head>
-        <body>
-            <p>טקסט פסקה באורך סביר מעל עשרים תווים לבדיקת DOM.</p>
-        </body>
-        </html>
-        """
-        parser = BaseSourceParser()
-        extracted = parser.parse_article_html(html, "https://example.com/article/2")
-        assert extracted.original_title == "כותרת OpenGraph"
-        assert extracted.original_subtitle == "תיאור OpenGraph"
-        assert extracted.main_image.url == "https://example.com/og_image.jpg"
-
-    def test_fallback_to_dom_heuristics(self):
-        html = """
-        <html>
-        <head><title>כותרת הטאג כותרת | אתר ספורט</title></head>
-        <body>
-            <h1>כותרת ראשית H1</h1>
-            <p>פסקה ראשונה בגוף הכתבה שמכילה מספיק תווים כדי להיחשב טקסט תוכן אמיתי.</p>
-            <p>פסקה שנייה בגוף הכתבה שמכילה גם היא מספיק תווים כדי להילכד על ידי הניתוח.</p>
-            <img src="https://example.com/content_img.jpg" />
-        </body>
-        </html>
-        """
-        parser = BaseSourceParser()
-        extracted = parser.parse_article_html(html, "https://example.com/article/3")
-        assert extracted.original_title == "כותרת ראשית H1"
-        assert len(extracted.paragraphs) == 2
-        assert extracted.main_image.url == "https://example.com/content_img.jpg"
+        entries = await scraper.fetch_rss(client=mock_client)
+        assert len(entries) == 2
+        assert "הפועל באר שבע" in entries[0]["title"]
+        assert "one.co.il" in entries[0]["link"]
 
 
 class TestScraperRegistry:
-    """Unit tests for ScraperRegistry lookups and url domain matching."""
+    """Unit tests for scraper registry and factory dispatch."""
 
-    def test_registry_lookups(self):
-        registry = ScraperRegistry()
-        assert registry.get_scraper("sport5").source_name == "Sport5"
-        assert registry.get_scraper("one").source_name == "ONE"
-        assert registry.get_scraper("walla").source_name == "Walla! Sports"
-        assert registry.get_scraper("ynet").source_name == "Ynet Sport"
-        assert registry.get_scraper("sport1").source_name == "Sport1"
-        assert registry.get_scraper("israel_hayom").source_name == "Israel Hayom"
-        assert registry.get_scraper("haaretz").source_name == "Haaretz"
+    def test_get_registered_scrapers(self):
+        s_sport5 = get_scraper("sport5")
+        assert isinstance(s_sport5, Sport5Scraper)
+        assert s_sport5.publisher_id == "sport5"
 
-    def test_url_domain_detection(self):
-        registry = ScraperRegistry()
-        assert registry.get_scraper_for_url("https://www.sport5.co.il/articles.aspx?docID=1").source_name == "Sport5"
-        assert registry.get_scraper_for_url("https://www.one.co.il/Article/123.html").source_name == "ONE"
-        assert registry.get_scraper_for_url("https://sports.walla.co.il/item/123").source_name == "Walla! Sports"
-        assert registry.get_scraper_for_url("https://www.ynet.co.il/sport/article/123").source_name == "Ynet Sport"
-        assert registry.get_scraper_for_url("https://sport1.maariv.co.il/article/123").source_name == "Sport1"
-        assert registry.get_scraper_for_url("https://www.israelhayom.co.il/sport/article/123").source_name == "Israel Hayom"
-        assert registry.get_scraper_for_url("https://www.haaretz.co.il/sport/123").source_name == "Haaretz"
+        s_ynet = get_scraper("ynet")
+        assert isinstance(s_ynet, YnetScraper)
+        assert s_ynet.publisher_id == "ynet"
 
-    def test_list_all_scrapers(self):
-        scrapers = list_scrapers()
-        assert len(scrapers) == 7
-        codes = {s.source_code for s in scrapers}
-        assert codes == {"sport5", "one", "walla", "ynet", "sport1", "israel_hayom", "haaretz"}
+        s_one = get_scraper("one")
+        assert isinstance(s_one, ONEScraper)
+        assert s_one.publisher_id == "one"
+
+    def test_case_insensitivity_in_registry(self):
+        s1 = get_scraper("SPORT5")
+        s2 = get_scraper("  yNeT  ")
+        assert isinstance(s1, Sport5Scraper)
+        assert isinstance(s2, YnetScraper)
+
+    def test_unknown_publisher_raises_error(self):
+        with pytest.raises(ValueError, match="Unknown publisher 'nonexistent'"):
+            get_scraper("nonexistent")
+
+    def test_get_all_scrapers(self):
+        scrapers = get_all_scrapers()
+        assert len(scrapers) == 3
+        pub_ids = {s.publisher_id for s in scrapers}
+        assert pub_ids == {"sport5", "ynet", "one"}
+
+    def test_register_custom_scraper(self):
+        class MockCustomScraper(BaseScraper):
+            publisher_id = "custom"
+            def extract_article(self, html, rss_entry=None):
+                return None
+
+        register_scraper("custom", MockCustomScraper)
+        custom_inst = get_scraper("custom")
+        assert isinstance(custom_inst, MockCustomScraper)
+        assert "custom" in SCRAPER_REGISTRY
+
+
+class TestScraperScrapeOrchestration:
+    """Unit tests for full async scraper scrape flow."""
+
+    @pytest.mark.asyncio
+    async def test_scrape_orchestration(self):
+        scraper = Sport5Scraper()
+
+        mock_rss_response = MagicMock()
+        mock_rss_response.status_code = 200
+        mock_rss_response.text = SPORT5_RSS_XML
+
+        mock_article_response = MagicMock()
+        mock_article_response.status_code = 200
+        mock_article_response.text = SPORT5_ARTICLE_HTML
+
+        async def mock_get(url, **kwargs):
+            if "rss.aspx" in url:
+                return mock_rss_response
+            return mock_article_response
+
+        with patch("httpx.AsyncClient.get", new=mock_get):
+            articles = await scraper.scrape(limit=2)
+            assert len(articles) <= 2
+            assert all(isinstance(a, RawArticlePayload) for a in articles)
+            assert all(a.publisher == "sport5" for a in articles)
+            assert all(len(a.raw_body) <= 3500 for a in articles)

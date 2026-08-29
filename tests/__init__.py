@@ -1,2 +1,1 @@
-"""Test package initialization."""
-# Fan-Zone test suite
+"""Fan Zone automated test suite package."""

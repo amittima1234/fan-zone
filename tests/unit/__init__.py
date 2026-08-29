@@ -1,1 +1,1 @@
-"""Unit tests package."""
+"""Unit test suite for Fan Zone."""

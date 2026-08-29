@@ -1,85 +1,119 @@
-"""Database engine and session management for async SQLAlchemy 2.0."""
+"""Async SQLAlchemy database session, engine configuration, and connection management.
 
-import logging
-from typing import AsyncGenerator, Optional
-from sqlalchemy import event
-from sqlalchemy.engine import Engine
+Supports both SQLite (local development and in-memory test suites via aiosqlite with StaticPool)
+and PostgreSQL (production environments via asyncpg).
+"""
+
+import json
+from typing import Any, AsyncGenerator, Dict, Optional
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.orm import declarative_base
+from sqlalchemy.pool import NullPool, StaticPool
 
-from fan_zone.config import get_settings
-from fan_zone.db.base import Base
+from core.config import settings
 
-logger = logging.getLogger(__name__)
-
-# Global engine and sessionmaker singletons
-_engine: Optional[AsyncEngine] = None
-_session_factory: Optional[async_sessionmaker[AsyncSession]] = None
+# Base class for all SQLAlchemy declarative ORM models
+Base = declarative_base()
 
 
-def get_async_engine(database_url: Optional[str] = None) -> AsyncEngine:
-    """Creates or returns the cached AsyncEngine."""
-    global _engine
-    if _engine is not None and database_url is None:
-        return _engine
+def normalize_database_url(url: str) -> str:
+    """Normalize database connection URL to ensure appropriate async dialect prefixes.
 
-    settings = get_settings()
-    url = database_url or settings.DATABASE_URL
+    Converts:
+    - 'sqlite:///' -> 'sqlite+aiosqlite:///'
+    - 'postgres://' or 'postgresql://' -> 'postgresql+asyncpg://'
+    """
+    if not url:
+        return "sqlite+aiosqlite:///./fan_zone.db"
 
-    connect_args = {}
-    if url.startswith("sqlite"):
-        connect_args["check_same_thread"] = False
+    url_clean = url.strip()
 
-    engine = create_async_engine(
-        url,
-        echo=settings.DB_ECHO,
-        future=True,
-        connect_args=connect_args,
-    )
+    if url_clean.startswith("postgres://"):
+        return url_clean.replace("postgres://", "postgresql+asyncpg://", 1)
+    if url_clean.startswith("postgresql://"):
+        return url_clean.replace("postgresql://", "postgresql+asyncpg://", 1)
+    if url_clean.startswith("sqlite://") and not url_clean.startswith("sqlite+aiosqlite://"):
+        return url_clean.replace("sqlite://", "sqlite+aiosqlite://", 1)
 
-    # Enable SQLite foreign keys on connect
-    if url.startswith("sqlite"):
-        @event.listens_for(engine.sync_engine, "connect")
-        def _set_sqlite_pragma(dbapi_connection, connection_record):
-            cursor = dbapi_connection.cursor()
-            cursor.execute("PRAGMA foreign_keys=ON")
-            cursor.close()
-
-    if database_url is None:
-        _engine = engine
-    return engine
+    return url_clean
 
 
-def get_session_factory(engine: Optional[AsyncEngine] = None) -> async_sessionmaker[AsyncSession]:
-    """Creates or returns the cached async_sessionmaker."""
-    global _session_factory
-    if _session_factory is not None and engine is None:
-        return _session_factory
+def create_async_db_engine(
+    database_url: Optional[str] = None,
+    echo: Optional[bool] = None,
+    **kwargs: Any,
+) -> AsyncEngine:
+    """Create and configure an asynchronous SQLAlchemy engine.
 
-    target_engine = engine or get_async_engine()
-    factory = async_sessionmaker(
-        bind=target_engine,
-        class_=AsyncSession,
-        expire_on_commit=False,
-        autocommit=False,
-        autoflush=False,
-    )
+    Configures connection pooling and dialect-specific parameters based on the URL.
+    - SQLite in-memory uses StaticPool and check_same_thread=False.
+    - PostgreSQL uses pool_size, max_overflow, and pool_pre_ping.
+    """
+    db_url = normalize_database_url(database_url or settings.DATABASE_URL)
+    is_echo = echo if echo is not None else settings.DB_ECHO
 
-    if engine is None:
-        _session_factory = factory
-    return factory
+    engine_kwargs: Dict[str, Any] = {
+        "echo": is_echo,
+        "json_serializer": lambda obj: json.dumps(obj, ensure_ascii=False),
+    }
+
+    if "sqlite" in db_url.lower():
+        connect_args = kwargs.pop("connect_args", {})
+        connect_args.setdefault("check_same_thread", False)
+        engine_kwargs["connect_args"] = connect_args
+
+        if ":memory:" in db_url.lower():
+            # StaticPool maintains a single connection so in-memory SQLite tables persist
+            engine_kwargs.setdefault("poolclass", StaticPool)
+    elif "postgresql" in db_url.lower() or "postgres" in db_url.lower():
+        engine_kwargs.setdefault("pool_size", 10)
+        engine_kwargs.setdefault("max_overflow", 20)
+        engine_kwargs.setdefault("pool_pre_ping", True)
+
+    engine_kwargs.update(kwargs)
+    return create_async_engine(db_url, **engine_kwargs)
+
+
+# Global async engine instance using application settings
+engine: AsyncEngine = create_async_db_engine()
+
+# Global async session factory
+async_session_factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
+    bind=engine,
+    class_=AsyncSession,
+    expire_on_commit=False,
+    autoflush=False,
+)
+
+
+def get_session_factory(
+    engine_override: Optional[AsyncEngine] = None,
+) -> async_sessionmaker[AsyncSession]:
+    """Return an async_sessionmaker bound to the given engine or default engine."""
+    if engine_override is not None:
+        return async_sessionmaker(
+            bind=engine_override,
+            class_=AsyncSession,
+            expire_on_commit=False,
+            autoflush=False,
+        )
+    return async_session_factory
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
-    """FastAPI async dependency yielding an AsyncSession."""
-    factory = get_session_factory()
-    async with factory() as session:
+    """FastAPI async dependency yielding an AsyncSession.
+
+    Commits on successful completion and rolls back on unhandled exceptions.
+    """
+    async with async_session_factory() as session:
         try:
             yield session
+            await session.commit()
         except Exception:
             await session.rollback()
             raise
@@ -87,33 +121,16 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
             await session.close()
 
 
-async def init_db(engine: Optional[AsyncEngine] = None, seed_sources: bool = True) -> None:
-    """Initializes the database schema and seeds initial data."""
-    # Import all models to ensure they are registered on Base.metadata
-    from fan_zone.models import source, article, tag, story  # noqa: F401
-    
-    target_engine = engine or get_async_engine()
+async def init_db(engine_override: Optional[AsyncEngine] = None) -> None:
+    """Create all database tables defined in Base.metadata asynchronously."""
+    target_engine = engine_override or engine
     async with target_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    logger.info("Database schema initialized successfully.")
-
-    if seed_sources:
-        factory = get_session_factory(target_engine)
-        async with factory() as session:
-            from fan_zone.repositories.source_repo import SourceRepository
-            repo = SourceRepository(session)
-            await repo.seed_default_sources()
-            await session.commit()
-        logger.info("Default sports news sources verified/seeded.")
 
 
-async def close_db(engine: Optional[AsyncEngine] = None) -> None:
-    """Disposes of the database engine connection pool."""
-    global _engine, _session_factory
-    target_engine = engine or _engine
-    if target_engine is not None:
-        await target_engine.dispose()
-        if engine is None or engine == _engine:
-            _engine = None
-            _session_factory = None
-        logger.info("Database engine disposed.")
+async def reset_db(engine_override: Optional[AsyncEngine] = None) -> None:
+    """Drop and recreate all database tables defined in Base.metadata."""
+    target_engine = engine_override or engine
+    async with target_engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.run_sync(Base.metadata.create_all)

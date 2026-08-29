@@ -1,1 +1,1 @@
-"""Integration tests package."""
+"""Integration test package for Fan Zone application."""
