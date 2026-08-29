@@ -20,7 +20,7 @@ class ONEScraper(BaseScraper):
     publisher_id: str = "one"
     base_url: str = "https://www.one.co.il"
     rss_urls: List[str] = [
-        "https://www.one.co.il/cat/coop/xml/rss/newsfeed.aspx",
+        "https://www.one.co.il/rss",
     ]
 
     def extract_article(
