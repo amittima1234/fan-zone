@@ -5,6 +5,7 @@ from typing import Dict, List, Type
 from services.scrapers.base import BaseScraper
 from services.scrapers.one import ONEScraper
 from services.scrapers.sport5 import Sport5Scraper
+from services.scrapers.walla import WallaScraper
 from services.scrapers.ynet import YnetScraper
 
 # Central registry mapping lowercase publisher identifiers to scraper classes
@@ -12,6 +13,7 @@ SCRAPER_REGISTRY: Dict[str, Type[BaseScraper]] = {
     "sport5": Sport5Scraper,
     "ynet": YnetScraper,
     "one": ONEScraper,
+    "walla": WallaScraper,
 }
 
 

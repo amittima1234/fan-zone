@@ -10,6 +10,7 @@ from services.scrapers import (
     ONEScraper,
     SCRAPER_REGISTRY,
     Sport5Scraper,
+    WallaScraper,
     YnetScraper,
     get_all_scrapers,
     get_scraper,
@@ -25,6 +26,7 @@ from tests.fixtures.sample_html import (
     SPORT5_ARTICLE_HTML,
     SPORT5_DIRTY_HTML,
     SPORT5_LONG_ARTICLE_HTML,
+    WALLA_ARTICLE_HTML,
     YNET_ARTICLE_HTML,
     YNET_DIRTY_HTML,
     YNET_LONG_ARTICLE_HTML,
@@ -32,6 +34,7 @@ from tests.fixtures.sample_html import (
 from tests.fixtures.sample_rss import (
     ONE_RSS_XML,
     SPORT5_RSS_XML,
+    WALLA_RSS_XML,
     YNET_RSS_XML,
 )
 
@@ -263,6 +266,30 @@ class TestONEScraper:
         assert "הפועל באר שבע" in entries[0]["title"]
         assert "one.co.il" in entries[0]["link"]
 
+    def test_walla_extract_clean_article(self):
+        scraper = WallaScraper()
+        payload = scraper.extract_article(WALLA_ARTICLE_HTML)
+
+        assert payload is not None
+        assert payload.publisher == "walla"
+        assert "ג'ודו" in payload.title or "מדליית זהב" in payload.title
+        assert len(payload.raw_body) <= 3500
+
+    @pytest.mark.asyncio
+    async def test_walla_fetch_rss_mocked(self):
+        scraper = WallaScraper()
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.text = WALLA_RSS_XML
+
+        mock_client = AsyncMock()
+        mock_client.get.return_value = mock_response
+
+        entries = await scraper.fetch_rss(client=mock_client)
+        assert len(entries) == 1
+        assert "מדליית זהב" in entries[0]["title"]
+        assert "walla.co.il" in entries[0]["link"]
+
 
 class TestScraperRegistry:
     """Unit tests for scraper registry and factory dispatch."""
@@ -280,11 +307,17 @@ class TestScraperRegistry:
         assert isinstance(s_one, ONEScraper)
         assert s_one.publisher_id == "one"
 
+        s_walla = get_scraper("walla")
+        assert isinstance(s_walla, WallaScraper)
+        assert s_walla.publisher_id == "walla"
+
     def test_case_insensitivity_in_registry(self):
         s1 = get_scraper("SPORT5")
         s2 = get_scraper("  yNeT  ")
+        s3 = get_scraper("WaLLa")
         assert isinstance(s1, Sport5Scraper)
         assert isinstance(s2, YnetScraper)
+        assert isinstance(s3, WallaScraper)
 
     def test_unknown_publisher_raises_error(self):
         with pytest.raises(ValueError, match="Unknown publisher 'nonexistent'"):
@@ -292,9 +325,9 @@ class TestScraperRegistry:
 
     def test_get_all_scrapers(self):
         scrapers = get_all_scrapers()
-        assert len(scrapers) == 3
+        assert len(scrapers) == 4
         pub_ids = {s.publisher_id for s in scrapers}
-        assert pub_ids == {"sport5", "ynet", "one"}
+        assert pub_ids == {"sport5", "ynet", "one", "walla"}
 
     def test_register_custom_scraper(self):
         class MockCustomScraper(BaseScraper):

@@ -155,11 +155,13 @@ class TestIngestionTriggerEndpoint:
 
         with patch("services.scrapers.sport5.Sport5Scraper.scrape", new_callable=AsyncMock) as m_s5, \
              patch("services.scrapers.ynet.YnetScraper.scrape", new_callable=AsyncMock) as m_ynet, \
-             patch("services.scrapers.one.ONEScraper.scrape", new_callable=AsyncMock) as m_one:
+             patch("services.scrapers.one.ONEScraper.scrape", new_callable=AsyncMock) as m_one, \
+             patch("services.scrapers.walla.WallaScraper.scrape", new_callable=AsyncMock) as m_walla:
 
             m_s5.return_value = sport5_articles
             m_ynet.return_value = ynet_articles
             m_one.return_value = one_articles
+            m_walla.return_value = []
 
             response = await async_client.post("/api/v1/ingestion/trigger")
             assert response.status_code == 200

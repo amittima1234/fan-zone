@@ -759,11 +759,13 @@ class TestManualTriggerPipelineE2E:
 
         with patch("services.scrapers.sport5.Sport5Scraper.scrape", new_callable=AsyncMock) as m_s5, \
              patch("services.scrapers.ynet.YnetScraper.scrape", new_callable=AsyncMock) as m_ynet, \
-             patch("services.scrapers.one.ONEScraper.scrape", new_callable=AsyncMock) as m_one:
+             patch("services.scrapers.one.ONEScraper.scrape", new_callable=AsyncMock) as m_one, \
+             patch("services.scrapers.walla.WallaScraper.scrape", new_callable=AsyncMock) as m_walla:
 
             m_s5.return_value = [sample_articles[0]]
             m_ynet.return_value = [sample_articles[1]]
             m_one.return_value = []
+            m_walla.return_value = []
 
             trigger_res = await e2e_client.post("/api/v1/ingestion/trigger")
             assert trigger_res.status_code == 200

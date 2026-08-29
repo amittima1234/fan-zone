@@ -13,6 +13,7 @@ from services.scrapers.registry import (
     register_scraper,
 )
 from services.scrapers.sport5 import Sport5Scraper
+from services.scrapers.walla import WallaScraper
 from services.scrapers.ynet import YnetScraper
 
 __all__ = [
@@ -20,6 +21,7 @@ __all__ = [
     "Sport5Scraper",
     "YnetScraper",
     "ONEScraper",
+    "WallaScraper",
     "SCRAPER_REGISTRY",
     "get_scraper",
     "get_all_scrapers",
