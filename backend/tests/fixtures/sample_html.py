@@ -96,6 +96,58 @@ SPORT5_DIRTY_HTML = """<!DOCTYPE html>
 </body>
 </html>"""
 
+SPORT5_NEWSROOM_HTML = """<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+    <meta charset="utf-8">
+    <title>חדר המבזקים - ערוץ הספורט</title>
+</head>
+<body>
+    <div class="newsroom-page">
+        <h1>חדר מבזקים בזמן אמת</h1>
+        <div class="newsroom-list">
+            <div class="newsroom-item">
+                <span class="time">14:30</span>
+                <a href="/articles.aspx?FolderID=4453&docID=5001" class="title">
+                    <h3>מנצ'סטר סיטי סיכמה על צירופו של קשר נבחרת ספרד</h3>
+                </a>
+                <p class="desc">אלופת אנגליה תשלם 60 מיליון יורו עבור הכוכב הצעיר.</p>
+            </div>
+            <div class="newsroom-item">
+                <span class="time">13:45</span>
+                <a href="/articles.aspx?FolderID=4439&docID=5002" class="title">
+                    <h3>מכבי חיפה השלימה את עסקת השאלתו של החלוץ</h3>
+                </a>
+                <p class="desc">החלוץ יצטרף לאימונים כבר מחר בבוקר.</p>
+            </div>
+        </div>
+    </div>
+</body>
+</html>"""
+
+SPORT5_SECTION_HTML = """<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+    <meta charset="utf-8">
+    <title>כדורסל ישראלי ועולמי - ערוץ הספורט</title>
+</head>
+<body>
+    <div class="category-page">
+        <div class="main-article">
+            <a href="https://www.sport5.co.il/articles.aspx?FolderID=4467&docID=5003">
+                <img src="/images/maccabi.jpg" alt="מכבי תל אביב">
+                <h2 class="title">ניצחון ענק למכבי תל אביב על ריאל מדריד ביורוליג</h2>
+            </a>
+        </div>
+        <div class="art-item">
+            <a href="/articles.aspx?FolderID=4467&docID=5004">
+                <span class="title">הפועל ירושלים החתימה גארד אמריקאי מוביל</span>
+            </a>
+        </div>
+    </div>
+</body>
+</html>"""
+
 # ---------------------------------------------------------------------------
 # 2. Ynet Sports HTML Fixtures
 # ---------------------------------------------------------------------------

@@ -565,7 +565,9 @@ class MockAIEnricher:
         # 1. Entity and Tag Extraction
         matched_tags: List[str] = []
         for kw, tag_name in self.KNOWN_ENTITIES.items():
-            if kw.lower() in combined_text:
+            # Allow optional Hebrew prefixes (ב, ה, ל, מ, כ, ש, ו) but disallow trailing letters
+            pattern = rf"(?:^|[^\wא-ת]|[בהלמכשו]{{1,2}}){re.escape(kw.lower())}(?![\wא-ת])"
+            if re.search(pattern, combined_text):
                 if tag_name not in matched_tags:
                     matched_tags.append(tag_name)
 

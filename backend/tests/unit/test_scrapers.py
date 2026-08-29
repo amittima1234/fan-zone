@@ -14,6 +14,7 @@ from services.scrapers import (
     YnetScraper,
     get_all_scrapers,
     get_scraper,
+    is_non_article_content,
     register_scraper,
     sanitize_article_text,
     truncate_article_text,
@@ -26,6 +27,8 @@ from tests.fixtures.sample_html import (
     SPORT5_ARTICLE_HTML,
     SPORT5_DIRTY_HTML,
     SPORT5_LONG_ARTICLE_HTML,
+    SPORT5_NEWSROOM_HTML,
+    SPORT5_SECTION_HTML,
     WALLA_ARTICLE_HTML,
     YNET_ARTICLE_HTML,
     YNET_DIRTY_HTML,
@@ -118,6 +121,35 @@ class TestTruncateArticleText:
         assert truncate_article_text(text, max_chars=5) == "Hello"
 
 
+class TestNonArticleContentFiltering:
+    """Unit tests for filtering out static, legal, contact, and accessibility pages."""
+
+    def test_detects_terms_and_privacy_titles(self):
+        assert is_non_article_content(title="תנאי השימוש ומדיניות הפרטיות אתר ספורט 5") is True
+        assert is_non_article_content(title="תנאי שימוש באתר") is True
+        assert is_non_article_content(title="מדיניות פרטיות") is True
+        assert is_non_article_content(title="Privacy Policy") is True
+        assert is_non_article_content(title="Terms of Use") is True
+
+    def test_detects_accessibility_and_contact_titles(self):
+        assert is_non_article_content(title="הצהרת נגישות") is True
+        assert is_non_article_content(title="הסדרי נגישות באתר") is True
+        assert is_non_article_content(title="צור קשר עם ערוץ הספורט") is True
+        assert is_non_article_content(title="שירות לקוחות ופניות הציבור") is True
+        assert is_non_article_content(title="כתבו לנו") is True
+
+    def test_detects_legal_folders_and_urls(self):
+        assert is_non_article_content(url="https://sport5.co.il/articles.aspx?FolderID=413&docID=50633") is True
+        assert is_non_article_content(url="https://www.sport5.co.il/articles.aspx?FolderID=11202&docID=425839") is True
+        assert is_non_article_content(url="https://www.sport5.co.il/articles.aspx?FolderID=11202&docID=425624") is True
+        assert is_non_article_content(url="https://www.ynet.co.il/terms") is True
+
+    def test_valid_sports_articles_are_not_filtered(self):
+        assert is_non_article_content(title="ניצחון ענק: מכבי תל אביב גברה 82:86 על ריאל מדריד ביורוליג") is False
+        assert is_non_article_content(title="מנור סולומון כבש שער ניצחון בפרמייר ליג") is False
+        assert is_non_article_content(url="https://www.sport5.co.il/articles.aspx?FolderID=4467&docID=450101") is False
+
+
 class TestSport5Scraper:
     """Unit tests for Sport5 portal scraper."""
 
@@ -155,21 +187,92 @@ class TestSport5Scraper:
         assert "ברק בכר" in payload.title or "מכבי חיפה" in payload.title
         assert "עלי מוחמד" in payload.raw_body
 
+    def test_sport5_discards_static_legal_pages(self):
+        scraper = Sport5Scraper()
+
+        # 1. Terms of use
+        p1 = scraper.extract_article(
+            html="<html><body><h1>תנאי השימוש ומדיניות הפרטיות אתר ספורט 5</h1><p>תקנון האתר...</p></body></html>",
+            rss_entry={"link": "https://sport5.co.il/articles.aspx?FolderID=413&docID=50633"},
+        )
+        assert p1 is None
+
+        # 2. Accessibility declaration
+        p2 = scraper.extract_article(
+            html="<html><body><h1>הצהרת נגישות</h1><p>אנו פועלים להנגשת האתר...</p></body></html>",
+            rss_entry={"link": "https://www.sport5.co.il/articles.aspx?FolderID=11202&docID=425839"},
+        )
+        assert p2 is None
+
+        # 3. Contact us
+        p3 = scraper.extract_article(
+            html="<html><body><h1>צור קשר עם ערוץ הספורט</h1><p>כתובת וטלפון...</p></body></html>",
+            rss_entry={"link": "https://www.sport5.co.il/articles.aspx?FolderID=11202&docID=425624"},
+        )
+        assert p3 is None
+
+    def test_sport5_sections_configuration(self):
+        scraper = Sport5Scraper()
+        assert len(scraper.SECTIONS) == 6
+        section_urls = [s["url"] for s in scraper.SECTIONS]
+        assert "https://www.sport5.co.il/NewsRoom" in section_urls
+        assert "https://www.sport5.co.il/world.aspx?FolderID=4453" in section_urls
+        assert "https://www.sport5.co.il/world.aspx?FolderID=4439" in section_urls
+        assert "https://www.sport5.co.il/world.aspx?FolderID=4467" in section_urls
+        assert "https://nba.sport5.co.il/NBA.aspx?FolderId=402" in section_urls
+        assert "https://www.sport5.co.il/world.aspx?FolderID=4498" in section_urls
+
+        categories = {s["category"] for s in scraper.SECTIONS}
+        assert "מבזקים" in categories
+        assert "כדורגל עולמי" in categories
+        assert "כדורגל ישראלי" in categories
+        assert "כדורסל" in categories
+        assert "NBA" in categories
+        assert "ענפים נוספים" in categories
+
+    def test_sport5_extract_links_from_newsroom_html(self):
+        scraper = Sport5Scraper()
+        seen = set()
+        entries = scraper._extract_links_from_section_html(
+            SPORT5_NEWSROOM_HTML,
+            {"url": "https://www.sport5.co.il/NewsRoom", "category": "מבזקים"},
+            seen,
+        )
+        assert len(entries) == 2
+        assert "מנצ'סטר סיטי" in entries[0]["title"]
+        assert entries[0]["category"] == "מבזקים"
+        assert "5001" in entries[0]["link"]
+        assert "מכבי חיפה" in entries[1]["title"]
+        assert entries[1]["category"] == "מבזקים"
+        assert "5002" in entries[1]["link"]
+
+    def test_sport5_extract_links_from_category_section_html(self):
+        scraper = Sport5Scraper()
+        seen = set()
+        entries = scraper._extract_links_from_section_html(
+            SPORT5_SECTION_HTML,
+            {"url": "https://www.sport5.co.il/world.aspx?FolderID=4467", "category": "כדורסל"},
+            seen,
+        )
+        assert len(entries) >= 2
+        titles = [e["title"] for e in entries]
+        assert any("מכבי תל אביב" in t for t in titles)
+        assert any("הפועל ירושלים" in t for t in titles)
+        assert all(e["category"] == "כדורסל" for e in entries)
+
     @pytest.mark.asyncio
-    async def test_sport5_fetch_rss_mocked(self):
+    async def test_sport5_fetch_sections_mocked(self):
         scraper = Sport5Scraper()
         mock_response = MagicMock()
         mock_response.status_code = 200
-        mock_response.text = SPORT5_RSS_XML
+        mock_response.text = SPORT5_SECTION_HTML
 
         mock_client = AsyncMock()
         mock_client.get.return_value = mock_response
 
-        entries = await scraper.fetch_rss(client=mock_client)
-        assert len(entries) == 3
-        assert entries[0]["title"] == "ניצחון ענק: מכבי תל אביב גברה 82:86 על ריאל מדריד ביורוליג"
-        assert "sport5.co.il" in entries[0]["link"]
-        assert entries[0]["author"] == "עמרי פולק"
+        entries = await scraper.fetch_section_entries(client=mock_client)
+        assert len(entries) >= 2
+        assert any("sport5.co.il" in e["link"] for e in entries)
 
 
 class TestYnetScraper:
@@ -348,18 +451,18 @@ class TestScraperScrapeOrchestration:
     async def test_scrape_orchestration(self):
         scraper = Sport5Scraper()
 
-        mock_rss_response = MagicMock()
-        mock_rss_response.status_code = 200
-        mock_rss_response.text = SPORT5_RSS_XML
+        mock_section_response = MagicMock()
+        mock_section_response.status_code = 200
+        mock_section_response.text = SPORT5_SECTION_HTML
 
         mock_article_response = MagicMock()
         mock_article_response.status_code = 200
         mock_article_response.text = SPORT5_ARTICLE_HTML
 
         async def mock_get(url, **kwargs):
-            if "rss.aspx" in url:
-                return mock_rss_response
-            return mock_article_response
+            if "articles.aspx" in url:
+                return mock_article_response
+            return mock_section_response
 
         with patch("httpx.AsyncClient.get", new=mock_get):
             articles = await scraper.scrape(limit=2)

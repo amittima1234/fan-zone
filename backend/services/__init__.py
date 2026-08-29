@@ -8,6 +8,8 @@ from services.ai_worker import (
 )
 from services.scrapers import (
     BaseScraper,
+    NON_ARTICLE_TITLE_KEYWORDS,
+    NON_ARTICLE_URL_PATTERNS,
     ONEScraper,
     SCRAPER_REGISTRY,
     Sport5Scraper,
@@ -15,6 +17,7 @@ from services.scrapers import (
     YnetScraper,
     get_all_scrapers,
     get_scraper,
+    is_non_article_content,
     sanitize_article_text,
     truncate_article_text,
 )
@@ -30,6 +33,9 @@ __all__ = [
     "get_all_scrapers",
     "sanitize_article_text",
     "truncate_article_text",
+    "is_non_article_content",
+    "NON_ARTICLE_TITLE_KEYWORDS",
+    "NON_ARTICLE_URL_PATTERNS",
     "GeminiAIEnricher",
     "MockAIEnricher",
     "AIEnrichmentService",

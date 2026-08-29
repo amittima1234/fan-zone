@@ -45,6 +45,7 @@ from tests.fixtures.sample_html import (
     ONE_ARTICLE_HTML,
     SPORT5_ARTICLE_HTML,
     SPORT5_LONG_ARTICLE_HTML,
+    SPORT5_SECTION_HTML,
     YNET_ARTICLE_HTML,
 )
 from tests.fixtures.sample_rss import (
@@ -166,17 +167,36 @@ def create_mock_transport_for_scrapers(
         if any(err_url in url_str for err_url in error_urls):
             return httpx.Response(500, text="Internal Server Error")
 
-        # Check RSS endpoints
-        for endpoint, rss_content in rss_map.items():
-            if endpoint in url_str:
-                return httpx.Response(200, text=rss_content, headers={"Content-Type": "application/xml; charset=utf-8"})
+        # 1. Exact match in html_map or rss_map
+        if url_str in html_map:
+            return httpx.Response(200, text=html_map[url_str], headers={"Content-Type": "text/html; charset=utf-8"})
+        if url_str in rss_map:
+            rss_content = rss_map[url_str]
+            is_xml = "<?xml" in rss_content[:50] or "xml" in url_str
+            content_type = "application/xml; charset=utf-8" if is_xml else "text/html; charset=utf-8"
+            return httpx.Response(200, text=rss_content, headers={"Content-Type": content_type})
 
-        # Check HTML article endpoints
+        # 2. Check if request is an RSS / section listing feed (not an article page)
+        is_feed = any(p in url_str for p in [".xml", "/rss", "NewsRoom", "world.aspx", "NBA.aspx"]) and "docid" not in url_str.lower()
+        if is_feed:
+            for endpoint, rss_content in rss_map.items():
+                if endpoint in url_str:
+                    is_xml = "<?xml" in rss_content[:50] or "xml" in url_str
+                    content_type = "application/xml; charset=utf-8" if is_xml else "text/html; charset=utf-8"
+                    return httpx.Response(200, text=rss_content, headers={"Content-Type": content_type})
+
+        # 3. Check HTML article endpoints
         for endpoint, html_content in html_map.items():
             if endpoint in url_str:
                 return httpx.Response(200, text=html_content, headers={"Content-Type": "text/html; charset=utf-8"})
 
-        # Default fallback
+        # 4. Fallback check on rss_map
+        for endpoint, rss_content in rss_map.items():
+            if endpoint in url_str:
+                is_xml = "<?xml" in rss_content[:50] or "xml" in url_str
+                content_type = "application/xml; charset=utf-8" if is_xml else "text/html; charset=utf-8"
+                return httpx.Response(200, text=rss_content, headers={"Content-Type": content_type})
+
         return httpx.Response(200, text="<html><body><p>תוכן כללי</p></body></html>")
 
     return httpx.MockTransport(handler)
@@ -208,8 +228,17 @@ class TestFullPipelineFlow:
         """
         # Step 1: Initialize scraper with mock HTTP transport
         transport = create_mock_transport_for_scrapers(
-            rss_map={"sport5.co.il/rss": SPORT5_RSS_XML, "sport5.co.il": SPORT5_RSS_XML},
-            html_map={"450101": SPORT5_ARTICLE_HTML, "sport5.co.il": SPORT5_ARTICLE_HTML},
+            rss_map={
+                "sport5.co.il/NewsRoom": SPORT5_SECTION_HTML,
+                "world.aspx": SPORT5_SECTION_HTML,
+                "NBA.aspx": SPORT5_SECTION_HTML,
+                "sport5.co.il": SPORT5_SECTION_HTML,
+            },
+            html_map={
+                "articles.aspx": SPORT5_ARTICLE_HTML,
+                "docID": SPORT5_ARTICLE_HTML,
+                "450101": SPORT5_ARTICLE_HTML,
+            },
         )
         scraper = Sport5Scraper()
 
@@ -334,12 +363,17 @@ class TestMultiPublisherConcurrentIngestion:
         """Concurrently scrape Sport5, Ynet, and ONE, push all to queue, enrich, and verify in API feed."""
         transport = create_mock_transport_for_scrapers(
             rss_map={
-                "sport5.co.il": SPORT5_RSS_XML,
+                "NewsRoom": SPORT5_SECTION_HTML,
+                "world.aspx": SPORT5_SECTION_HTML,
+                "NBA.aspx": SPORT5_SECTION_HTML,
+                "sport5.co.il": SPORT5_SECTION_HTML,
                 "ynet.co.il": YNET_RSS_XML,
                 "one.co.il": ONE_RSS_XML,
             },
             html_map={
-                "sport5.co.il": SPORT5_ARTICLE_HTML,
+                "articles.aspx": SPORT5_ARTICLE_HTML,
+                "docID": SPORT5_ARTICLE_HTML,
+                "sport5.co.il/articles": SPORT5_ARTICLE_HTML,
                 "ynet.co.il": YNET_ARTICLE_HTML,
                 "one.co.il": ONE_ARTICLE_HTML,
             },

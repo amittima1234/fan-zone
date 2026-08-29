@@ -67,6 +67,83 @@ def truncate_article_text(text: str, max_chars: int = 3500) -> str:
     return text[:max_chars].rstrip()
 
 
+NON_ARTICLE_TITLE_KEYWORDS = (
+    "תנאי שימוש",
+    "תנאי השימוש",
+    "מדיניות פרטיות",
+    "מדיניות הפרטיות",
+    "הצהרת נגישות",
+    "הסדרי נגישות",
+    "נגישות",
+    "צור קשר",
+    "יצירת קשר",
+    "כתבו לנו",
+    "שירות לקוחות",
+    "אודות",
+    "אודותינו",
+    "מי אנחנו",
+    "אודות האתר",
+    "דרושים",
+    "קריירה",
+    "פרסם אצלנו",
+    "פרסום באתר",
+    "פרסום בספורט 5",
+    "זכויות יוצרים",
+    "תקנון",
+    "תקנון האתר",
+    "תקנון שימוש",
+    "כללי שימוש",
+    "הרשמה לניוזלטר",
+    "מפת אתר",
+    "הורדת האפליקציה",
+    "האפליקציה שלנו",
+    "terms of use",
+    "privacy policy",
+    "accessibility",
+    "contact us",
+    "about us",
+)
+
+NON_ARTICLE_URL_PATTERNS = (
+    "/terms",
+    "/privacy",
+    "/accessibility",
+    "/contact",
+    "/about",
+    "/advertise",
+    "/rules",
+    "folderid=413",     # Sport5 legal/terms folder
+    "folderid=11202",   # Sport5 accessibility/contact folder
+    "folderid=448",     # Sport5 about/contact folder
+)
+
+
+def is_non_article_content(
+    title: Optional[str] = None,
+    url: Optional[str] = None,
+    raw_body: Optional[str] = None,
+) -> bool:
+    """Return True if the title, URL, or body indicates static/legal/contact/non-sports content."""
+    if title:
+        clean_title = title.strip().lower()
+        for kw in NON_ARTICLE_TITLE_KEYWORDS:
+            if kw in clean_title:
+                return True
+
+    if url:
+        clean_url = url.strip().lower()
+        for pat in NON_ARTICLE_URL_PATTERNS:
+            if pat in clean_url:
+                return True
+
+    if raw_body:
+        clean_body = raw_body.strip().lower()
+        if any(kw in clean_body[:250] for kw in ("הצהרת נגישות", "תנאי שימוש באתר", "מדיניות פרטיות", "הסדרי נגישות")):
+            return True
+
+    return False
+
+
 class BaseScraper(ABC):
     """Abstract base class defining the contract for Israeli sports portal scrapers."""
 
@@ -187,6 +264,14 @@ class BaseScraper(ABC):
                             entry_dict["image_url"] = item["media_content"][0].get("url")
                         elif item.get("enclosures") and len(item["enclosures"]) > 0:
                             entry_dict["image_url"] = item["enclosures"][0].get("href")
+
+                        # Discard static/legal/contact/non-article links in RSS
+                        if is_non_article_content(
+                            title=entry_dict["title"],
+                            url=entry_dict["link"],
+                            raw_body=entry_dict["summary"],
+                        ):
+                            continue
 
                         entries.append(entry_dict)
                 except Exception as e:

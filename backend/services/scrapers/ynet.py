@@ -9,7 +9,12 @@ from bs4 import BeautifulSoup
 import trafilatura
 
 from schemas.feed import RawArticlePayload
-from services.scrapers.base import BaseScraper, sanitize_article_text, truncate_article_text
+from services.scrapers.base import (
+    BaseScraper,
+    is_non_article_content,
+    sanitize_article_text,
+    truncate_article_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +135,11 @@ class YnetScraper(BaseScraper):
         truncated_body = truncate_article_text(clean_body, max_chars=3500)
 
         if not clean_title or not truncated_body:
+            return None
+
+        # Filter out static/legal/accessibility/contact pages
+        if is_non_article_content(title=clean_title, url=url, raw_body=clean_body):
+            logger.info("Discarding non-article content for Ynet: '%s' (%s)", clean_title, url)
             return None
 
         if not url:
