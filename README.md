@@ -139,6 +139,8 @@ backend/.venv/Scripts/python.exe -m pytest -q backend/tests/
 | `DATABASE_URL` | `sqlite+aiosqlite:///./fan_zone.db` | Async SQLAlchemy URL (`sqlite+aiosqlite` or `postgresql+asyncpg`) |
 | `GEMINI_API_KEY` | `""` | Google Gemini API Key |
 | `GEMINI_MODEL` | `gemini-3.7-flash` | Gemini model name for structured outputs |
+| `GEMINI_MAX_RETRIES` | `3` | Maximum retry attempts on 503/429/overload errors |
+| `GEMINI_RETRY_DELAY_SECONDS` | `2.0` | Initial delay in seconds between retries (exponential backoff) |
 | `USE_MOCK_AI` | `false` | Set `true` to force deterministic offline AI mock mode |
 | `ENABLE_SCHEDULER` | `true` | Enable periodic background scraper scheduler |
 | `POLL_INTERVAL_SECONDS`| `300` | Frequency (seconds) for scheduled portal scraping |

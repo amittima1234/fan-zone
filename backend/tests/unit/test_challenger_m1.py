@@ -455,7 +455,7 @@ class TestSettingsStress:
         monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://prod_user:prod_pass@db.internal:5432/prod_fanzone")
         monkeypatch.setenv("DB_ECHO", "true")
         monkeypatch.setenv("GEMINI_API_KEY", "prod-gemini-key")
-        monkeypatch.setenv("GEMINI_MODEL", "gemini-2.5-flash")
+        monkeypatch.setenv("GEMINI_MODEL", "gemini-3.7-flash")
         monkeypatch.setenv("USE_MOCK_AI", "false")
         monkeypatch.setenv("ENABLE_SCHEDULER", "false")
         monkeypatch.setenv("POLL_INTERVAL_SECONDS", "120")

@@ -1,12 +1,13 @@
 """AI enrichment service and worker for Fan Zone sports articles.
 
-Integrates with Google GenAI SDK (gemini-2.5-flash) using structured outputs
+Integrates with Google GenAI SDK (gemini-3.7-flash) using structured outputs
 constrained to the AIEnrichedCard Pydantic schema, with deterministic offline
 MockAIEnricher fallback and queue-to-repository processing.
 """
 
 from __future__ import annotations
 
+import asyncio
 import html
 import json
 import logging
@@ -45,14 +46,53 @@ class AIEnrichmentError(Exception):
 _UNSET: Any = object()
 
 
+def _is_transient_gemini_error(exc: Exception) -> bool:
+    """Return True if an exception represents a transient/retriable Gemini error (e.g. 503, 429, overload, timeout)."""
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+        return True
+
+    code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+    if code in (429, 500, 502, 503, 504, 529):
+        return True
+
+    err_str = str(exc).lower()
+    transient_indicators = (
+        "503",
+        "429",
+        "500",
+        "502",
+        "504",
+        "529",
+        "overloaded",
+        "overload",
+        "resource_exhausted",
+        "resource exhausted",
+        "rate limit",
+        "rate_limit",
+        "quota",
+        "unavailable",
+        "temporarily unavailable",
+        "service unavailable",
+        "deadline exceeded",
+        "timeout",
+        "connection reset",
+        "try again",
+        "high demand",
+    )
+    return any(indicator in err_str for indicator in transient_indicators)
+
+
 class GeminiAIEnricher:
-    """Live Google GenAI enrichment engine using Gemini Structured Outputs."""
+    """Live Google GenAI enrichment engine using Gemini Structured Outputs with retry on 503/overload."""
 
     def __init__(
         self,
         api_key: Optional[str] = _UNSET,
         model: Optional[str] = None,
         client: Optional[Any] = None,
+        max_retries: Optional[int] = None,
+        initial_delay: Optional[float] = None,
+        backoff_factor: float = 2.0,
     ) -> None:
         cfg = get_settings()
         if api_key is _UNSET:
@@ -61,6 +101,9 @@ class GeminiAIEnricher:
             self.api_key = api_key
 
         self.model_name = model or cfg.GEMINI_MODEL or "gemini-3.7-flash"
+        self.max_retries = max_retries if max_retries is not None else getattr(cfg, "GEMINI_MAX_RETRIES", 3)
+        self.initial_delay = initial_delay if initial_delay is not None else getattr(cfg, "GEMINI_RETRY_DELAY_SECONDS", 2.0)
+        self.backoff_factor = backoff_factor
 
         if client is not None:
             self.client = client
@@ -70,7 +113,7 @@ class GeminiAIEnricher:
             self.client = None
 
     async def enrich_article(self, article: RawArticlePayload) -> AIEnrichedCard:
-        """Enrich a sports article using Google GenAI SDK with structured output constraints."""
+        """Enrich a sports article using Google GenAI SDK with structured output constraints and 503 retries."""
         if self.client is None:
             raise AIEnrichmentError("Google GenAI client is not initialized or API key is missing")
 
@@ -92,53 +135,78 @@ Requirements:
 4. context_label: Short journalistic category: e.g. 'Match Report', 'Transfer Rumor', 'Injury Update', 'Tactical Analysis', 'Breaking News', 'Interview'.
 """
 
-        try:
-            # Build GenerateContentConfig using google.genai types if available
-            config: Any
-            if types is not None and hasattr(types, "GenerateContentConfig"):
-                afc = types.AutomaticFunctionCallingConfig(disable=True) if hasattr(types, "AutomaticFunctionCallingConfig") else None
-                config = types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=AIEnrichedCard,
-                    temperature=0.2,
-                    automatic_function_calling=afc,
-                )
-            else:
-                config = {
-                    "response_mime_type": "application/json",
-                    "response_schema": AIEnrichedCard,
-                    "temperature": 0.2,
-                    "automatic_function_calling": {"disable": True},
-                }
-
-            response = await self.client.aio.models.generate_content(
-                model=self.model_name,
-                contents=prompt,
-                config=config,
+        # Build GenerateContentConfig using google.genai types if available
+        config: Any
+        if types is not None and hasattr(types, "GenerateContentConfig"):
+            afc = types.AutomaticFunctionCallingConfig(disable=True) if hasattr(types, "AutomaticFunctionCallingConfig") else None
+            config = types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=AIEnrichedCard,
+                temperature=0.2,
+                automatic_function_calling=afc,
             )
+        else:
+            config = {
+                "response_mime_type": "application/json",
+                "response_schema": AIEnrichedCard,
+                "temperature": 0.2,
+                "automatic_function_calling": {"disable": True},
+            }
 
-            # 1. Check if response has parsed attribute already containing the model or dict
-            if hasattr(response, "parsed") and response.parsed is not None:
-                if isinstance(response.parsed, AIEnrichedCard):
-                    return response.parsed
-                if isinstance(response.parsed, dict):
-                    return AIEnrichedCard.model_validate(response.parsed)
+        attempt = 0
+        current_delay = self.initial_delay
 
-            # 2. Check if response has text attribute containing JSON
-            if hasattr(response, "text") and response.text:
-                return AIEnrichedCard.model_validate_json(response.text)
+        while True:
+            attempt += 1
+            try:
+                response = await self.client.aio.models.generate_content(
+                    model=self.model_name,
+                    contents=prompt,
+                    config=config,
+                )
 
-            # 3. If response is a dict directly
-            if isinstance(response, dict):
-                return AIEnrichedCard.model_validate(response)
+                # 1. Check if response has parsed attribute already containing the model or dict
+                if hasattr(response, "parsed") and response.parsed is not None:
+                    if isinstance(response.parsed, AIEnrichedCard):
+                        return response.parsed
+                    if isinstance(response.parsed, dict):
+                        return AIEnrichedCard.model_validate(response.parsed)
 
-            raise AIEnrichmentError(f"Unexpected response structure from Gemini API: {response}")
+                # 2. Check if response has text attribute containing JSON
+                if hasattr(response, "text") and response.text:
+                    return AIEnrichedCard.model_validate_json(response.text)
 
-        except Exception as e:
-            if isinstance(e, AIEnrichmentError):
-                raise
-            logger.error("Gemini AI enrichment failed for '%s': %s", article.title, e)
-            raise AIEnrichmentError(f"Gemini API enrichment failed: {e}") from e
+                # 3. If response is a dict directly
+                if isinstance(response, dict):
+                    return AIEnrichedCard.model_validate(response)
+
+                raise AIEnrichmentError(f"Unexpected response structure from Gemini API: {response}")
+
+            except Exception as e:
+                if isinstance(e, AIEnrichmentError) and not _is_transient_gemini_error(e):
+                    raise
+
+                # If the error is 503 / overload / transient and we have remaining retries
+                if attempt <= self.max_retries and _is_transient_gemini_error(e):
+                    logger.warning(
+                        "Gemini API 503/overload error for '%s' (attempt %d/%d): %s. Waiting %.1fs before retrying...",
+                        article.title[:40],
+                        attempt,
+                        self.max_retries,
+                        e,
+                        current_delay,
+                    )
+                    await asyncio.sleep(current_delay)
+                    current_delay *= self.backoff_factor
+                    continue
+
+                logger.error(
+                    "Gemini AI enrichment failed for '%s' after %d attempt(s): %s",
+                    article.title,
+                    attempt,
+                    e,
+                )
+                raise AIEnrichmentError(f"Gemini API enrichment failed: {e}") from e
 
 
 class MockAIEnricher:

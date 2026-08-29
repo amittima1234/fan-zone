@@ -270,7 +270,7 @@ class TestGeminiAIEnricher:
 
         enricher = GeminiAIEnricher(
             api_key="test-api-key-123",
-            model="gemini-2.5-flash",
+            model="gemini-3.7-flash",
             client=mock_client,
         )
 
@@ -309,7 +309,7 @@ class TestGeminiAIEnricher:
 
         enricher = GeminiAIEnricher(
             api_key="test-key",
-            model="gemini-2.5-flash",
+            model="gemini-3.7-flash",
             client=mock_client,
         )
 

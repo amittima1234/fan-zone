@@ -61,6 +61,14 @@ class Settings(BaseSettings):
         default="gemini-3.7-flash",
         description="Gemini model identifier"
     )
+    GEMINI_MAX_RETRIES: int = Field(
+        default=3,
+        description="Maximum retry attempts on transient Gemini errors (503/429/overload)"
+    )
+    GEMINI_RETRY_DELAY_SECONDS: float = Field(
+        default=2.0,
+        description="Initial delay in seconds between Gemini retries"
+    )
     USE_MOCK_AI: bool = Field(
         default=False,
         description="Mock AI mode flag for deterministic offline testing"
